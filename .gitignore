@@ -1,0 +1,7 @@
+# Runtime state written by the launchers and guest hooks (session mappings,
+# pasted images). Never commit: it contains conversation ids and paths.
+state/*
+!state/.gitkeep
+__pycache__/
+*.pyc
+.DS_Store

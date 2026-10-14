@@ -1,0 +1,18 @@
+#!/usr/bin/env bash
+# cmux-trust-cwd: mark $PWD as trusted in claude's config so `claude` doesn't
+# block on the "Is this a project you trust?" onboarding prompt. Idempotent,
+# silent, fast. Installed in the VM at ~/.local/bin/cmux-trust-cwd and called
+# from the ~/.bashrc CMUX-VM-SHELL block (and vm-restore after cd'ing to a
+# resumed session's dir).
+python3 - "$PWD" <<'PY' 2>/dev/null || true
+import json, os, sys
+p = os.path.expanduser("~/.claude.json")
+try:
+    d = json.load(open(p))
+except Exception:
+    sys.exit()
+n = d.setdefault("projects", {}).setdefault(sys.argv[1], {})
+if not n.get("hasTrustDialogAccepted"):
+    n["hasTrustDialogAccepted"] = True
+    json.dump(d, open(p, "w"))
+PY

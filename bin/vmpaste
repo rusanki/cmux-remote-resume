@@ -1,0 +1,82 @@
+#!/usr/bin/env bash
+# vmpaste: bridge a macOS clipboard image into the Lima VM so an agent running
+# there can read it. Saves the image under state/clip (inside this repo, which
+# is mounted into the guest) and yields the GUEST path.
+#
+#   vmpaste                    save; if run from a cmux pane, type the guest
+#                              path into the focused terminal, else copy it
+#   vmpaste --surface <ref>    save and type the path into a specific surface
+#   vmpaste --clip             save and copy the guest path only
+set -u
+CMUX_LIMA_ROOT=$(cd "$(dirname "$(python3 -c 'import os,sys;print(os.path.realpath(sys.argv[1]))' "${BASH_SOURCE[0]}")")/.." && pwd -P)
+. "$CMUX_LIMA_ROOT/lib/cmux-lima-env.sh"
+SHARE_HOST="$CMUX_LIMA_ROOT/state/clip"
+SHARE_GUEST="$CMUX_VM_GUEST_ROOT/state/clip"
+CLI="$CMUX_CLI"
+
+TARGET_SURFACE="" ; TARGET_WS="" ; FORCE_CLIP=""
+case "${1:-}" in
+    --surface) TARGET_SURFACE="${2:-}" ; TARGET_WS="${CMUX_WORKSPACE_ID:-}" ;;
+    --surface=*) TARGET_SURFACE="${1#*=}" ; TARGET_WS="${CMUX_WORKSPACE_ID:-}" ;;
+    --clip|--clipboard) FORCE_CLIP=1 ;;
+esac
+# No explicit target: aim at the focused cmux terminal surface, so a global
+# hotkey drops the path into whatever pane you are looking at.
+if [ -z "$FORCE_CLIP" ] && [ -z "$TARGET_SURFACE" ]; then
+    read -r TARGET_SURFACE TARGET_WS < <(
+        "$CLI" identify --no-caller --id-format both 2>/dev/null | python3 -c '
+import json,sys
+try:
+    f=json.load(sys.stdin).get("focused",{})
+    if f.get("surface_type")=="terminal" and not f.get("is_browser_surface"):
+        print(f.get("surface_id") or "", f.get("workspace_id") or "")
+except Exception:
+    pass
+' 2>/dev/null)
+fi
+[ -n "$FORCE_CLIP" ] && TARGET_SURFACE=""
+
+mkdir -p "$SHARE_HOST" 2>/dev/null
+ts=$(date +%Y%m%d-%H%M%S)
+host_out="$SHARE_HOST/paste-$ts.png"
+
+# Extract the clipboard image as PNG via AppleScript (no extra tools needed).
+res=$(osascript <<APPLESCRIPT 2>/dev/null
+try
+    set outFile to POSIX file "$host_out"
+    set imgData to (the clipboard as «class PNGf»)
+    set fh to open for access outFile with write permission
+    set eof fh to 0
+    write imgData to fh
+    close access fh
+    return "ok"
+on error errMsg
+    try
+        close access (POSIX file "$host_out")
+    end try
+    return "err:" & errMsg
+end try
+APPLESCRIPT
+)
+
+if [ "$res" != "ok" ] || [ ! -s "$host_out" ]; then
+    rm -f "$host_out" 2>/dev/null
+    echo "vmpaste: no image on the clipboard (copy a screenshot first)." >&2
+    exit 1
+fi
+
+guest_path="$SHARE_GUEST/paste-$ts.png"
+
+if [ -n "$TARGET_SURFACE" ]; then
+    # Type the guest path with a trailing space; no Enter is sent.
+    ws_args=()
+    [ -n "$TARGET_WS" ] && ws_args=(--workspace "$TARGET_WS")
+    if "$CLI" send ${ws_args[@]+"${ws_args[@]}"} --surface "$TARGET_SURFACE" "$guest_path " >/dev/null 2>&1; then
+        echo "vmpaste: image -> $guest_path  (typed into the focused pane)"
+        exit 0
+    fi
+    echo "vmpaste: could not type into the focused pane; falling back to clipboard." >&2
+fi
+
+printf '%s' "$guest_path" | pbcopy
+echo "vmpaste: image -> $guest_path  (guest path copied to clipboard)"

@@ -1,0 +1,13 @@
+# Minimal Lima instance for cmux-lima-resume.
+#   limactl create --name ubuntu lima/ubuntu.example.yaml && limactl start ubuntu
+# Adjust the repo mount location to wherever you cloned this project.
+base: template://ubuntu
+cpus: 4
+memory: 8GiB
+disk: 100GiB
+mountType: virtiofs
+mounts:
+- location: "~"
+  writable: false
+- location: "~/projects/cmux-lima-resume"   # this repository, writable: hooks write state/
+  writable: true

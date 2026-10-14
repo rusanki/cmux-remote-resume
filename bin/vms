@@ -1,0 +1,42 @@
+#!/usr/bin/env bash
+# vms [guest-dir]: plain shell in the Lima VM with cmux pane restore.
+# The guest shell records its cwd on every prompt, so after a cmux restart or a
+# reboot the pane reopens a VM shell in the directory you were last in. Starting
+# claude or codex inside this shell upgrades the mapping to a resumable session.
+set -u
+CMUX_LIMA_ROOT=$(cd "$(dirname "$(python3 -c 'import os,sys;print(os.path.realpath(sys.argv[1]))' "${BASH_SOURCE[0]}")")/.." && pwd -P)
+. "$CMUX_LIMA_ROOT/lib/cmux-lima-env.sh"
+VM_NAME="$CMUX_VM_NAME"
+DIR="${1:-}"
+SID="${CMUX_SURFACE_ID:-${CMUX_PANEL_ID:-}}"
+
+python3 "$CMUX_LIMA_ROOT/lib/cmux-vm-ready.py" "$VM_NAME" || exit 1
+
+if [ -n "$DIR" ]; then
+    case "$DIR" in
+        /*) : ;;
+        *)  echo "vms: dir must be an ABSOLUTE guest path (inside the VM), got: '$DIR'" >&2
+            exit 2 ;;
+    esac
+    if ! limactl shell --workdir / "$VM_NAME" -- test -d "$DIR" 2>/dev/null; then
+        echo "vms: guest directory does not exist in the VM: $DIR" >&2
+        exit 2
+    fi
+    mkdir -p "$HOME/.cache/cmux-vmc" 2>/dev/null
+    printf '%s\n' "${DIR%/}" >> "$HOME/.cache/cmux-vmc/history" 2>/dev/null || true
+fi
+
+if [ -n "$SID" ]; then
+    # --source vmc routes through cmux's approval flow; the auto record minted
+    # at first approval covers every pane that uses vm-restore.
+    "$CMUX_CLI" surface resume set --kind vm --name "VM shell" --cwd "$HOME" \
+        --source vmc --shell "$CMUX_LIMA_ROOT/bin/vm-restore" >/dev/null 2>&1 || true
+else
+    echo "vms: no CMUX_SURFACE_ID; the shell will run but will not auto-restore." >&2
+fi
+
+exec limactl shell "$VM_NAME" -- env \
+    CMUX_SURFACE_ID="$SID" CMUX_VM_NAME="$VM_NAME" CMUX_VM_CD="$DIR" \
+    CMUX_VM_AGENT='' CMUX_RESUME_SID='' CMUX_VM_AGENT_MODE="$CMUX_VM_AGENT_MODE" \
+    CMUX_VM_GUEST_ROOT="$CMUX_VM_GUEST_ROOT" \
+    bash -ic "source '$CMUX_VM_GUEST_ROOT/lib/cmux-vm-run.sh'"

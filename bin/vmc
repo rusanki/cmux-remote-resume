@@ -1,0 +1,65 @@
+#!/usr/bin/env bash
+# vmc [guest-dir] [--claude|--codex] [--resume <uuid>]
+# Launch Claude Code or Codex inside the Lima VM from a cmux pane. The pane's
+# restore binding is registered so cmux reopens the exact session later.
+set -eu
+CMUX_LIMA_ROOT=$(cd "$(dirname "$(python3 -c 'import os,sys;print(os.path.realpath(sys.argv[1]))' "${BASH_SOURCE[0]}")")/.." && pwd -P)
+. "$CMUX_LIMA_ROOT/lib/cmux-lima-env.sh"
+VM_NAME="$CMUX_VM_NAME"
+SID="${CMUX_SURFACE_ID:-${CMUX_PANEL_ID:-}}"
+DIR="" RSID="" AGENT=""
+while [ $# -gt 0 ]; do
+    case "$1" in
+        --claude) AGENT=claude; shift ;;
+        --codex) AGENT=codex; shift ;;
+        --agent) AGENT="${2:?vmc: --agent needs claude or codex}"; shift 2 ;;
+        -r|--resume) RSID="${2:?vmc: --resume needs a session UUID}"; shift 2 ;;
+        --resume=*) RSID="${1#*=}"; shift ;;
+        -h|--help)
+            echo 'usage: vmc [guest-dir] [--claude|--codex|--agent claude|codex] [--resume <session-UUID>]'
+            echo 'Without an agent flag, vmc offers a Claude / Codex menu.'
+            exit 0 ;;
+        -*) echo "vmc: unknown option: $1" >&2; exit 2 ;;
+        *) if [ -z "$DIR" ]; then DIR="$1"; shift; else echo 'vmc: too many directories' >&2; exit 2; fi ;;
+    esac
+done
+if [ -z "$AGENT" ]; then
+    if [ ! -t 0 ]; then
+        echo 'vmc: select an agent with --claude or --codex when running non-interactively.' >&2
+        exit 2
+    fi
+    printf '\nChoose an agent:\n  1) Claude\n  2) Codex\n'
+    while :; do
+        read -r -p 'Agent [1/2, default 1]: ' choice || exit 1
+        case "$choice" in
+            ''|1|claude|Claude) AGENT=claude; break ;;
+            2|codex|Codex) AGENT=codex; break ;;
+            *) echo 'Enter 1 for Claude or 2 for Codex.' ;;
+        esac
+    done
+fi
+case "$AGENT" in claude|codex) ;; *) echo "vmc: unsupported agent: $AGENT" >&2; exit 2 ;; esac
+python3 "$CMUX_LIMA_ROOT/lib/cmux-vm-ready.py" "$VM_NAME"
+if [ -n "$RSID" ]; then
+    RESOLVED=$(limactl shell --workdir / "$VM_NAME" -- python3 "$CMUX_VM_GUEST_ROOT/lib/cmux-vm-resolve.py" "$AGENT" "$RSID") || exit 2
+    DIR="${DIR:-$RESOLVED}"
+fi
+if [ -n "$DIR" ]; then
+    case "$DIR" in /*) ;; *) echo 'vmc: directory must be an absolute guest path.' >&2; exit 2 ;; esac
+    limactl shell --workdir / "$VM_NAME" -- test -d "$DIR" || { echo "vmc: guest directory does not exist: $DIR" >&2; exit 2; }
+    mkdir -p "$HOME/.cache/cmux-vmc"
+    printf '%s\n' "${DIR%/}" >> "$HOME/.cache/cmux-vmc/history"
+fi
+if [ -n "$SID" ]; then
+    "$CMUX_CLI" surface resume set --kind vm --name "VM $AGENT" --cwd "$HOME" \
+        --source vmc --shell "$CMUX_LIMA_ROOT/bin/vm-restore" >/dev/null || {
+        echo 'vmc: could not register pane restore; refusing to launch an untracked session.' >&2; exit 1;
+    }
+else
+    echo 'vmc: outside a cmux pane; automatic restore is unavailable.' >&2
+fi
+exec limactl shell "$VM_NAME" -- env \
+    CMUX_SURFACE_ID="$SID" CMUX_VM_NAME="$VM_NAME" CMUX_VM_CD="$DIR" \
+    CMUX_VM_AGENT="$AGENT" CMUX_RESUME_SID="$RSID" CMUX_VM_AGENT_MODE="$CMUX_VM_AGENT_MODE" \
+    CMUX_VM_GUEST_ROOT="$CMUX_VM_GUEST_ROOT" \
+    bash -ic "source '$CMUX_VM_GUEST_ROOT/lib/cmux-vm-run.sh'"

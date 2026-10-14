@@ -1,0 +1,107 @@
+#!/usr/bin/env python3
+"""Codex wrapper: registers an explicit `codex resume <uuid>` with the pane mapping
+(Codex does not emit SessionStart for resumes), then execs the real codex."""
+import base64
+import json
+import os
+from pathlib import Path
+import subprocess
+import sys
+import uuid
+
+
+def resume_target(args):
+    takes_value = {'-c','--config','-m','--model','-p','--profile','-s','--sandbox',
+                   '-a','--ask-for-approval','--enable','--disable','--remote',
+                   '--remote-auth-token-env','--add-dir','--image','-i','--local-provider',
+                   '-C','--cd'}
+    command = None
+    sid = None
+    cwd = None
+    i = 0
+    while i < len(args):
+        arg = args[i]
+        if arg in ('--last','--help','-h','--version','-V','--'):
+            return None, cwd
+        if arg in takes_value:
+            if i+1 >= len(args): return None,cwd
+            if arg in ('-C','--cd'):cwd=args[i+1]
+            i+=2;continue
+        if arg.startswith('--cd='):cwd=arg.split('=',1)[1]
+        if arg.startswith('-C') and len(arg)>2:cwd=arg[2:]
+        if arg.startswith('-'):
+            i+=1;continue
+        if command is None:
+            if arg != 'resume':return None,cwd
+            command = arg
+        elif sid is None:
+            try:sid=str(uuid.UUID(arg))
+            except ValueError:return None,cwd
+        else:
+            break  # Remaining positional text is the prompt, not CLI options.
+        i+=1
+    return sid,cwd
+
+
+def capture_args(args):
+    # cmux restores in the saved absolute cwd. Replaying relative --cd would
+    # apply it twice. Keep execution args untouched; strip it only from capture.
+    result=[]
+    i=0
+    while i<len(args):
+        arg=args[i]
+        if arg in ('-C','--cd'):
+            i+=2;continue
+        if arg.startswith('--cd=') or (arg.startswith('-C') and len(arg)>2):
+            i+=1;continue
+        result.append(arg)
+        i+=1
+    return result
+
+
+def real_codex():
+    """The next `codex` on PATH that is not this wrapper (or a symlink to it)."""
+    here = Path(__file__).resolve()
+    for entry in os.environ.get('PATH', '').split(os.pathsep):
+        candidate = Path(entry or '.')/'codex'
+        try:
+            if candidate.is_file() and os.access(candidate, os.X_OK) and candidate.resolve() != here:
+                return str(candidate)
+        except OSError:
+            continue
+    sys.exit('cmux-codex: codex is not installed (not found on PATH)')
+
+
+def main():
+    real = real_codex()
+    args = sys.argv[1:]
+    if os.environ.get('CMUX_SURFACE_ID'):
+        os.environ['CMUX_CODEX_PID'] = str(os.getpid())
+        sid,cwd = resume_target(args)
+        if sid:
+            root = Path(__file__).resolve().parent
+            if cwd is None:
+                result = subprocess.run([sys.executable,str(root/'cmux-vm-resolve.py'),'codex',sid],
+                                        capture_output=True,text=True)
+                if result.returncode == 0:cwd=result.stdout.strip()
+            cwd = os.path.abspath(os.path.expanduser(cwd or os.getcwd()))
+            if sys.platform == 'darwin':
+                # Record the wrapper as the executable, so native restore uses it again.
+                os.environ.update(CMUX_AGENT_LAUNCH_KIND='codex',
+                    CMUX_AGENT_LAUNCH_EXECUTABLE=str(Path(__file__).resolve()),
+                    CMUX_AGENT_LAUNCH_CWD=cwd,
+                    CMUX_AGENT_LAUNCH_ARGV_B64=base64.b64encode(
+                        ('\0'.join([str(Path(__file__).resolve())]+capture_args(args))).encode()).decode())
+                cli=os.environ.get('CMUX_CLI') or os.environ.get('CMUX_BUNDLED_CLI_PATH') or '/Applications/cmux.app/Contents/Resources/bin/cmux'
+                subprocess.run([cli,'hooks','codex','session-start'],
+                    input=json.dumps(dict(session_id=sid,cwd=cwd,hook_event_name='SessionStart',source='resume')),
+                    text=True,stdout=subprocess.DEVNULL,timeout=10)
+            else:
+                subprocess.run([sys.executable,str(root/'cmux-vm-state.py'),'hook','codex'],
+                    input=json.dumps(dict(session_id=sid,cwd=cwd,hook_event_name='SessionStart',source='resume')),
+                    text=True,check=True)
+    os.execv(real,[real]+args)
+
+
+if __name__ == '__main__':
+    main()
