@@ -34,7 +34,7 @@ _cmux_vmc_list_dirs() {
   local now=$EPOCHSECONDS mtime=0
   [[ -f "$cf" ]] && mtime=$(zstat +mtime "$cf" 2>/dev/null || stat -f %m "$cf" 2>/dev/null || echo 0)
   if [[ ! -f "$cf" || $(( now - mtime )) -gt 60 ]]; then
-    "$CMUX_REMOTE_HOME/bin/cmux-remote" exec "$target" "ls -1d ${base:q}/*/ 2>/dev/null" >| "$cf" 2>/dev/null
+    "$CMUX_REMOTE_HOME/bin/cmux-remote" exec "$target" "ls -1d ${${base%/}:q}/*/ 2>/dev/null" >| "$cf" 2>/dev/null
   fi
   [[ -f "$cf" ]] && cat "$cf"
 }
@@ -53,6 +53,15 @@ _vmc() {
   if [[ "$cur" == -* ]]; then
     compadd -- --claude --codex --agent --resume --target --help
     return
+  fi
+
+  # With nothing typed yet the candidates are recents plus the home dirs, and
+  # zsh would insert only their common prefix (just "/" once a recent such as
+  # /tmp exists), hiding the listing. Show the list instead; the next TAB then
+  # opens the menu as usual.
+  if [[ -z "$cur" && "$compstate[insert]" == *unambiguous ]]; then
+    compstate[insert]=''
+    compstate[list]='list force'
   fi
 
   local base
