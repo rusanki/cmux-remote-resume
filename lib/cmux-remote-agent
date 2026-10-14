@@ -1,15 +1,15 @@
 #!/usr/bin/env bash
-# Explicit permission policy for agents started by this project inside the VM.
-# CMUX_VM_AGENT_MODE=default keeps each agent's normal prompts; =bypass passes
+# Explicit permission policy for agents started by this project on the remote.
+# CMUX_AGENT_MODE=default keeps each agent's normal prompts; =bypass passes
 # the agent's own "skip approvals" flag. The flag never depends on shell aliases.
 set -eu
-agent="${1:?usage: cmux-vm-agent claude|codex [arguments...]}"
+agent="${1:?usage: cmux-remote-agent claude|codex [arguments...]}"
 shift
 ROOT=$(cd -- "$(dirname -- "${BASH_SOURCE[0]}")" && pwd)
-mode="${CMUX_VM_AGENT_MODE:-default}"
+mode="${CMUX_AGENT_MODE:-default}"
 case "$agent" in
     claude)
-        bin=$(command -v claude) || { echo 'cmux-vm-agent: claude is not installed in the VM' >&2; exit 127; }
+        bin=$(command -v claude) || { echo 'cmux-remote-agent: claude is not installed on the remote' >&2; exit 127; }
         case "$mode" in
             bypass) exec "$bin" --dangerously-skip-permissions "$@" ;;
             *) exec "$bin" "$@" ;;
@@ -21,5 +21,5 @@ case "$agent" in
             *) exec "$ROOT/cmux-codex" "$@" ;;
         esac
         ;;
-    *) echo "Unknown VM agent: $agent" >&2; exit 2 ;;
+    *) echo "Unknown agent: $agent" >&2; exit 2 ;;
 esac

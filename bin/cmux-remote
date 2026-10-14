@@ -1,0 +1,28 @@
+#!/usr/bin/env bash
+# Small CLI over the transport layer, for completion, vmpaste and debugging.
+#   cmux-remote targets                 list configured targets
+#   cmux-remote resolve NAME            print backend, address, remote root
+#   cmux-remote exec NAME SCRIPT        run a shell snippet on the remote
+#   cmux-remote home NAME               print the remote $HOME
+#   cmux-remote copy NAME LOCAL REMOTE  copy a file to the remote
+#   cmux-remote ready NAME              start if needed and wait for the remote
+#   cmux-remote record NAME             show the saved record for this pane
+set -eu
+CMUX_REMOTE_HOME=$(cd "$(dirname "$(python3 -c 'import os,sys;print(os.path.realpath(sys.argv[1]))' "${BASH_SOURCE[0]}")")/.." && pwd -P)
+. "$CMUX_REMOTE_HOME/lib/cmux-remote-env.sh"
+. "$CMUX_REMOTE_HOME/lib/cmux-remote-transport.sh"
+cmd="${1:-}"; shift || true
+case "$cmd" in
+    targets)
+        printf '%s (default)\n' "$CMUX_TARGET_DEFAULT"
+        env | sed -n 's/^CMUX_TARGET_\([A-Za-z0-9_]*\)=\(.*\)$/\1 \2/p' | grep -v '^DEFAULT ' | sort ;;
+    resolve) cmux_target_resolve "${1:?target}"; printf 'backend=%s address=%s root=%s\n' "$T_BACKEND" "$T_ADDR" "$T_ROOT" ;;
+    exec) cmux_remote_exec "${1:?target}" "${2:?script}" ;;
+    home) cmux_remote_home "${1:?target}" ;;
+    copy) cmux_remote_copy "${1:?target}" "${2:?local}" "${3:?remote}" ;;
+    ready) cmux_remote_ready "${1:?target}" ;;
+    record)
+        cmux_target_resolve "${1:?target}"
+        cmux_remote_exec "$1" "CMUX_SURFACE_ID=$(printf '%q' "${CMUX_SURFACE_ID:-${CMUX_PANEL_ID:-}}") python3 $T_ROOT/lib/cmux-remote-state.py read" ;;
+    *) sed -n '2,10p' "$0"; exit 2 ;;
+esac

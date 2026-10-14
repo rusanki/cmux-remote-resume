@@ -81,7 +81,7 @@ def main():
         if sid:
             root = Path(__file__).resolve().parent
             if cwd is None:
-                result = subprocess.run([sys.executable,str(root/'cmux-vm-resolve.py'),'codex',sid],
+                result = subprocess.run([sys.executable,str(root/'cmux-remote-resolve.py'),'codex',sid],
                                         capture_output=True,text=True)
                 if result.returncode == 0:cwd=result.stdout.strip()
             cwd = os.path.abspath(os.path.expanduser(cwd or os.getcwd()))
@@ -97,7 +97,7 @@ def main():
                     input=json.dumps(dict(session_id=sid,cwd=cwd,hook_event_name='SessionStart',source='resume')),
                     text=True,stdout=subprocess.DEVNULL,timeout=10)
             else:
-                subprocess.run([sys.executable,str(root/'cmux-vm-state.py'),'hook','codex'],
+                subprocess.run([sys.executable,str(root/'cmux-remote-state.py'),'hook','codex'],
                     input=json.dumps(dict(session_id=sid,cwd=cwd,hook_event_name='SessionStart',source='resume')),
                     text=True,check=True)
     os.execv(real,[real]+args)

@@ -1,5 +1,8 @@
 #!/usr/bin/env python3
-"""Atomic full-pane-ID session records, with compatibility for old VM shells."""
+"""Per-pane session records, written on the remote by agent hooks and the shell.
+
+Records live in CMUX_REMOTE_STATE_DIR (default ~/.cache/cmux-remote/sessions)
+keyed by the cmux surface UUID. Writes are atomic and locked."""
 import fcntl
 import json
 import os
@@ -41,8 +44,7 @@ def main():
             raise ValueError('missing CMUX_SURFACE_ID')
         return
     pane = str(uuid.UUID(surface))
-    root = Path(os.environ.get('CMUX_VM_MAP_DIR') or
-                str(Path(__file__).resolve().parent.parent/'state'/'sessions'))
+    root = Path(os.environ.get('CMUX_REMOTE_STATE_DIR') or str(Path.home()/'.cache/cmux-remote/sessions'))
     root.mkdir(parents=True, exist_ok=True)
     full = root / (pane + '.json')
     legacy = root / (surface[:8] + '.json')
@@ -70,10 +72,10 @@ def main():
                 print(json.dumps(current))
             else:
                 for key, field in (('GSESSION', 'session_id'), ('GCWD', 'cwd'),
-                                   ('GAGENT', 'agent'), ('GVM', 'vm_name'), ('GCODEX_HOME', 'codex_home')):
+                                   ('GAGENT', 'agent'), ('GTARGET', 'target'), ('GCODEX_HOME', 'codex_home')):
                     print(key + '=' + shlex.quote(str(current.get(field) or '')))
             return
-        vm = os.environ.get('CMUX_VM_NAME') or current.get('vm_name') or 'ubuntu'
+        target = os.environ.get('CMUX_TARGET') or current.get('target') or ''
         if mode == 'hook':
             agent = sys.argv[2]
             payload = json.load(sys.stdin)
@@ -98,10 +100,10 @@ def main():
                 if agent == 'codex':
                     current['codex_home'] = os.environ.get('CODEX_HOME') or str(Path.home()/'.codex')
         elif mode == 'launch':
-            current = {'cwd': os.environ.get('CMUX_VM_CD') or os.getcwd(), 'event': 'shell'}
+            current = {'cwd': os.environ.get('CMUX_REMOTE_CD') or os.getcwd(), 'event': 'shell'}
             session = os.environ.get('CMUX_RESUME_SID')
             if session:
-                current.update(agent=os.environ['CMUX_VM_AGENT'], session_id=session, event='resume')
+                current.update(agent=os.environ['CMUX_REMOTE_AGENT'], session_id=session, event='resume')
                 if current['agent'] == 'codex':
                     current['codex_home'] = os.environ.get('CODEX_HOME') or str(Path.home()/'.codex')
         elif mode == 'shell':
@@ -114,7 +116,7 @@ def main():
             current['preserve_on_prompt'] = True
         else:
             raise ValueError('unknown operation: ' + mode)
-        current.update(version=2, surface_id=pane, vm_name=vm, updated_at=time.time())
+        current.update(version=3, surface_id=pane, target=target, updated_at=time.time())
         atomic_write(legacy, current)
         atomic_write(full, current)
 

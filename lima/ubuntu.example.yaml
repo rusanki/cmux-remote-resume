@@ -1,4 +1,4 @@
-# Minimal Lima instance for cmux-lima-resume.
+# Minimal Lima instance for cmux-remote-resume.
 #   limactl create --name ubuntu lima/ubuntu.example.yaml && limactl start ubuntu
 # Adjust the repo mount location to wherever you cloned this project.
 base: template://ubuntu
@@ -6,8 +6,8 @@ cpus: 4
 memory: 8GiB
 disk: 100GiB
 mountType: virtiofs
+# The default home mount (read-only) is enough: the remote reads this
+# checkout at the same path and writes its state to its own ~/.cache.
 mounts:
 - location: "~"
   writable: false
-- location: "~/projects/cmux-lima-resume"   # this repository, writable: hooks write state/
-  writable: true

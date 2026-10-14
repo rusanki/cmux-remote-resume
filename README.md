@@ -1,18 +1,19 @@
-# cmux-lima-resume
+# cmux-remote-resume
 
-Run Claude Code and Codex inside a [Lima](https://lima-vm.io) VM from
-[cmux](https://github.com/manaflow-ai/cmux) panes, and get every pane back,
-on the exact same conversation, after a cmux restart, a VM restart, or a Mac
-reboot. No tmux.
+Run Claude Code and Codex on a remote machine, a [Lima](https://lima-vm.io)
+VM or any ssh host, from [cmux](https://github.com/manaflow-ai/cmux) panes,
+and get every pane back, on the exact same conversation, after a cmux
+restart, a VM restart, or a Mac reboot. No tmux.
 
 ```
-vmc                 # Claude or Codex in the VM, in this pane
+vmc                        # Claude or Codex on the default target, in this pane
 vmc ~/wd/app --codex
-vms /srv/project    # a VM shell that comes back in the same directory
-vmpaste             # drop a clipboard screenshot into the VM for the agent to read
+vmc --target build         # another configured target
+vms /srv/project           # a remote shell that comes back in the same directory
+vmpaste                    # drop a clipboard screenshot onto the remote for the agent
 ```
 
-Quit cmux, reboot, reopen: each VM pane reconnects and runs
+Quit cmux, reboot, reopen: each remote pane reconnects and runs
 `claude --resume <its uuid>` or `codex resume <its uuid>` in the directory it
 was in. Panes that were plain shells come back as shells in their last
 directory. A conversation you ended on purpose with `/exit` stays ended.
@@ -20,88 +21,85 @@ directory. A conversation you ended on purpose with `/exit` stays ended.
 ## How it works, in one paragraph
 
 cmux can re-run a per-pane "resume command" when it restores a layout. This
-project registers one command, `vm-restore`, for every VM pane. Inside the
-guest, Claude Code and Codex hooks write a small JSON record per pane
-(agent, session UUID, cwd, VM name) to `state/sessions/` in this repository,
-which is mounted into the VM, so host and guest see the same file.
-`vm-restore` reads that record and reopens exactly that session. It never
-guesses a session from "the newest transcript in this directory". Details in
-[docs/how-it-works.md](docs/how-it-works.md).
+project registers one command, `remote-restore`, for every remote pane. On
+the remote, Claude Code and Codex hooks write a small JSON record per pane
+(agent, session UUID, cwd) under `~/.cache/cmux-remote/sessions/`. The host
+keeps a one-line index of which target each pane belongs to. `remote-restore`
+reads the index, fetches the record over the transport, and reopens exactly
+that session. It never guesses a session from "the newest transcript in this
+directory". Details in [docs/how-it-works.md](docs/how-it-works.md).
+
+Transports: `lima` (through `limactl shell`, with VM start, post-reboot
+repair and startup serialization) and `ssh` (any host you can reach with an
+ssh alias). Nothing else differs between them.
 
 ## Requirements
 
 - macOS with cmux installed at `/Applications/cmux.app` (or set `CMUX_CLI`)
-- Lima (`brew install lima`) with a running Linux instance
-- Claude Code and/or Codex installed inside the VM
-- `python3` on both sides (macOS ships one; Ubuntu images ship one)
+- a target: a running Lima instance (`brew install lima`), or an ssh host
+  with key-based login, ideally with `ControlMaster auto` in `~/.ssh/config`
+- Claude Code and/or Codex installed on the target; bash and python3 there
+- `python3` on the Mac (ships with macOS)
 
 ## Install
 
 ```bash
-git clone https://github.com/rusanki/cmux-lima-resume ~/projects/cmux-lima-resume
+git clone https://github.com/rusanki/cmux-remote-resume ~/projects/cmux-remote-resume
+cd ~/projects/cmux-remote-resume
+./install.sh                                        # Lima instance "ubuntu"
+./install.sh --target devbox=ssh:devbox --default devbox
+./install.sh --target gpu=ssh:me@gpu.lan:/opt/cmux-remote-resume --notify
 ```
 
-Mount the checkout **writable** into the VM. With Lima's default home mount
-the path is the same on both sides but read-only, so add an explicit mount in
-`~/.lima/<vm>/lima.yaml` (see [lima/ubuntu.example.yaml](lima/ubuntu.example.yaml)):
+`install.sh` writes `~/.config/cmux-remote/config`, adds a marked block to
+`~/.zshrc` that puts `bin/` on your PATH and loads completion, and installs
+the remote side on each target: for ssh it rsyncs this repo to the remote
+root, for Lima it relies on the default home mount making the checkout
+visible at the same path. Then `remote/install-remote.py` runs there and adds
+the Claude and Codex hooks and a marked block to the remote `~/.bashrc`. Both
+installers are idempotent; `--sync` re-copies the repo after a `git pull`.
 
-```yaml
-mounts:
-- location: "~/projects/cmux-lima-resume"
-  writable: true
-```
-
-Restart the instance, then:
-
-```bash
-cd ~/projects/cmux-lima-resume
-./install.sh --vm ubuntu            # add --notify for OSC 9 turn-complete notifications
-```
-
-`install.sh` writes `~/.config/cmux-lima/config`, adds a marked block to
-`~/.zshrc` that puts `bin/` on your PATH and loads completion, and runs
-`guest/install-guest.py` inside the VM, which adds the Claude and Codex hooks
-and a marked block to the guest `~/.bashrc`. Both installers are idempotent.
-
-The first time a VM pane starts, cmux asks you to approve
-`.../bin/vm-restore` as an auto-restore command. Approve it once. You can
+The first time a remote pane starts, cmux asks you to approve
+`.../bin/remote-restore` as an auto-restore command. Approve it once. You can
 review it later under cmux Settings > Terminal > Resume Commands.
 
 ## Configuration
 
-`~/.config/cmux-lima/config`, plain `KEY=VALUE`. Environment variables of the
-same name win.
+`~/.config/cmux-remote/config`, plain `KEY=VALUE`. Environment variables of
+the same name win. See [config.example](config.example).
 
 | Key | Default | Meaning |
 |---|---|---|
-| `CMUX_VM_NAME` | `ubuntu` | Lima instance |
-| `CMUX_VM_GUEST_ROOT` | checkout path | Where this repo appears inside the guest |
-| `CMUX_VM_AGENT_MODE` | `default` | `bypass` runs `claude --dangerously-skip-permissions` and `codex --dangerously-bypass-approvals-and-sandbox` |
+| `CMUX_TARGET_<name>` | `lima:<name>` | `lima:<instance>[:<root>]` or `ssh:<destination>[:<root>]`; root is where this repo lives on the remote |
+| `CMUX_TARGET_DEFAULT` | `ubuntu` | Target used without `--target` |
+| `CMUX_SSH_OPTS` | empty | Extra options for ssh/scp/rsync, e.g. `-F ~/.ssh/work` |
+| `CMUX_AGENT_MODE` | `default` | `bypass` runs `claude --dangerously-skip-permissions` and `codex --dangerously-bypass-approvals-and-sandbox` |
 | `CMUX_CLI` | cmux's bundled CLI | Path to the `cmux` CLI |
 
-`bypass` is what the author uses: the VM is the sandbox, and an agent that
-stops to ask about every file edit is not useful unattended. It is not the
-default here. Decide for yourself.
+`bypass` is what the author uses: the remote is the sandbox, and an agent
+that stops to ask about every file edit is not useful unattended. It is not
+the default here. Decide for yourself.
 
 ## Commands
 
 | Command | What it does |
 |---|---|
-| `vmc [guest-dir] [--claude\|--codex] [--resume <uuid>]` | Start an agent in the VM. Without a flag it shows a two-item menu. Registers the pane for restore. |
-| `vms [guest-dir]` | VM shell with directory tracking. Starting `claude` or `codex` inside it upgrades the pane to a resumable session. |
-| `vm-restore` | What cmux runs on restore. Waits for the VM, retries the connection, offers Enter-to-retry on failure. Never run it by hand for a different pane. |
-| `vmpaste [--clip] [--surface <id>]` | Save the clipboard image under `state/clip/` and type its guest path into the focused pane. |
+| `vmc [dir] [--claude\|--codex] [--resume <uuid>] [--target NAME]` | Start an agent on the remote. Without a flag it shows a two-item menu. Registers the pane for restore. |
+| `vms [dir] [--target NAME]` | Remote shell with directory tracking. Starting `claude` or `codex` inside it upgrades the pane to a resumable session. |
+| `remote-restore` | What cmux runs on restore. Waits for the remote, retries the connection, offers Enter-to-retry on failure. |
+| `vmpaste [--clip] [--surface <id>] [--target NAME]` | Copy the clipboard image to the remote and type its path into the focused pane. |
+| `cmux-remote targets\|resolve\|exec\|home\|copy\|ready\|record` | Transport helpers, also handy for debugging. |
 | `ct [dir]` | Local Claude Code shortcut; cmux's own wrapper handles its restore. |
 
-Tab completion for `vmc`/`vms` lists guest directories live and remembers the
-ones you used.
+Tab completion for `vmc`/`vms` lists remote directories live and remembers
+the ones you used, per target.
 
 ## Behaviour you should know about
 
 - **Clean exits are respected.** `/exit` or Ctrl-D in Claude drops the mapping. A kill, a cmux quit, or a reboot keeps it.
-- **A failed resume keeps the mapping.** If the agent exits non-zero, the pane falls into a VM shell and the record is retained for the next restore.
-- **A booting VM is waited for, not raced.** Many panes restoring at once start the VM exactly once and wait until the guest answers over ssh.
-- **A VM left "Broken" by a host reboot is repaired.** Lima's leftover pid files can collide with a reused pid after a reboot, which makes `limactl start` refuse. The helper removes files older than the host boot. See [docs/troubleshooting.md](docs/troubleshooting.md).
+- **A failed resume keeps the mapping.** If the agent exits non-zero, the pane falls into a remote shell and the record is retained for the next restore.
+- **A booting Lima VM is waited for, not raced.** Many panes restoring at once start the VM exactly once and wait until the guest answers over ssh. An ssh host is probed with backoff until it answers.
+- **A Lima VM left "Broken" by a host reboot is repaired.** Leftover pid files can collide with a reused pid after a reboot, which makes `limactl start` refuse. The helper removes files older than the host boot. See [docs/troubleshooting.md](docs/troubleshooting.md).
 - **An in-flight generation is lost on restart.** Resume restores the conversation to its last persisted message. Nothing keeps the agent process alive while cmux is closed.
 
 ## Tests
@@ -110,20 +108,20 @@ ones you used.
 python3 -m unittest tests.test_resume
 ```
 
-Twenty-two tests cover the mapping store, hook semantics, the launchers (with
-a fake `limactl`), the Codex wrapper, the readiness helper including the
-post-reboot repair, config loading, and the guest installer. They run on macOS
-and Linux and touch nothing outside a temp directory.
+Twenty-four tests cover the record store, hook semantics, the launchers over
+fake `limactl`/`ssh`/`scp`, target resolution, the Codex wrapper, the
+readiness helper for both backends including the post-reboot repair, config
+loading, and the remote installer. They run on macOS and Linux and touch
+nothing outside a temp directory.
 
 ## Layout
 
 ```
-bin/          host launchers: vmc, vms, vm-restore, vmpaste
-lib/          shared helpers, run on host and guest via the mount
-guest/        guest installer, bashrc block, hook entrypoints, notify scripts
+bin/          host launchers: vmc, vms, remote-restore, vmpaste, cmux-remote
+lib/          config loader, transport, helpers; the runner and state store run on the remote
+remote/       remote installer, bashrc block, hook entrypoints, notify scripts
 completion/   zsh completion
 zsh/          host shell integration (ct, codex wrapper, PATH)
-state/        runtime data, git-ignored: sessions/ and clip/
 tests/        unittest suite
 docs/         design notes and troubleshooting
 lima/         example instance config

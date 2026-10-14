@@ -1,0 +1,62 @@
+#!/usr/bin/env bash
+# The command cmux runs in a restored pane. Looks up which target this pane
+# belongs to (host index), reads the pane's saved record on that remote
+# (agent, session UUID, cwd) and reopens exactly that; never guesses a session
+# by directory or recency.
+#
+# The remote may still be booting, or a Lima VM may be left Broken by a host
+# reboot, when cmux restores many panes at once. This waits for readiness,
+# retries a connection that fails before the remote shell ran, and offers a
+# one-key retry instead of silently dropping to a host shell.
+set -eu
+CMUX_REMOTE_HOME=$(cd "$(dirname "$(python3 -c 'import os,sys;print(os.path.realpath(sys.argv[1]))' "${BASH_SOURCE[0]}")")/.." && pwd -P)
+. "$CMUX_REMOTE_HOME/lib/cmux-remote-env.sh"
+. "$CMUX_REMOTE_HOME/lib/cmux-remote-transport.sh"
+SID="${CMUX_SURFACE_ID:-${CMUX_PANEL_ID:-}}"
+[ -n "$SID" ] || { echo 'remote-restore: not inside a cmux pane (CMUX_SURFACE_ID is unset).' >&2; exit 1; }
+index="$CMUX_REMOTE_CACHE/panes/$SID"
+TARGET=$(cat "$index" 2>/dev/null || true)
+TARGET="${TARGET:-$CMUX_TARGET_DEFAULT}"
+cmux_target_resolve "$TARGET"
+MAX_ATTEMPTS="${CMUX_REMOTE_RESTORE_ATTEMPTS:-3}"
+
+read_record() {
+    values=$(cmux_remote_exec "$TARGET" "CMUX_SURFACE_ID=$(printf '%q' "$SID") python3 $T_ROOT/lib/cmux-remote-state.py read-env") || return 1
+    eval "$values"
+}
+
+connect() {
+    local -a extra=()
+    if [ -n "${GCODEX_HOME:-}" ]; then extra+=("CODEX_HOME=$GCODEX_HOME"); fi
+    (cmux_remote_shell "$TARGET" "source $T_ROOT/lib/cmux-remote-run.sh" \
+        "CMUX_SURFACE_ID=$SID" "CMUX_TARGET=$TARGET" "CMUX_REMOTE_CD=${GCWD:-}" \
+        "CMUX_REMOTE_AGENT=${GAGENT:-}" "CMUX_RESUME_SID=${GSESSION:-}" \
+        "CMUX_AGENT_MODE=$CMUX_AGENT_MODE" ${extra[@]+"${extra[@]}"})
+}
+
+while :; do
+    attempt=0
+    while [ "$attempt" -lt "$MAX_ATTEMPTS" ]; do
+        attempt=$((attempt+1))
+        if cmux_remote_ready "$TARGET" && read_record; then
+            started=$(date +%s)
+            rc=0
+            connect || rc=$?
+            # ssh itself exits 255; anything else is the remote shell's own status.
+            if [ "$rc" -ne 255 ]; then exit "$rc"; fi
+            if [ $(( $(date +%s) - started )) -gt 30 ]; then
+                echo "remote-restore: connection to '$TARGET' dropped." >&2
+                exit "$rc"
+            fi
+            echo "remote-restore: could not connect to '$TARGET' (attempt $attempt of $MAX_ATTEMPTS)." >&2
+        fi
+        [ "$attempt" -lt "$MAX_ATTEMPTS" ] && sleep $((attempt*2))
+    done
+    echo "remote-restore: '$TARGET' is not reachable. The saved session is retained." >&2
+    if [ -t 0 ]; then
+        printf 'Press Enter to retry, or Ctrl-C for a host shell. '
+        read -r _ || exit 1
+    else
+        exit 1
+    fi
+done

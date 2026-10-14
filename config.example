@@ -1,20 +1,29 @@
-# cmux-lima-resume configuration. Copy to ~/.config/cmux-lima/config.
+# cmux-remote-resume configuration. Copy to ~/.config/cmux-remote/config.
 # Plain KEY=VALUE lines. Environment variables with the same name take
 # precedence over this file.
 
-# Lima instance the launchers talk to.
-CMUX_VM_NAME=ubuntu
+# Targets: CMUX_TARGET_<name>=<backend>:<address>[:<remote-root>]
+#   lima  address = Lima instance name. Remote root defaults to this checkout's
+#         own path, which Lima's default home mount exposes read-only (enough:
+#         state is written to the remote's ~/.cache, not into the repo).
+#   ssh   address = ssh destination or ~/.ssh/config alias. Remote root
+#         defaults to ~/.cmux-remote-resume; install.sh syncs the repo there.
+# A target name with no line here means lima:<name>.
+CMUX_TARGET_ubuntu=lima:ubuntu
+#CMUX_TARGET_devbox=ssh:devbox
+#CMUX_TARGET_build=ssh:me@build.example.com:/opt/cmux-remote-resume
 
-# Where this repository is visible INSIDE the guest. The directory must be
-# mounted writable, because the guest hooks write session mappings to state/.
-# With Lima's default home mount this is the same path as on the host.
-CMUX_VM_GUEST_ROOT=/Users/you/projects/cmux-lima-resume
+# Which target vmc / vms / vmpaste use without --target.
+CMUX_TARGET_DEFAULT=ubuntu
 
-# Agent permission mode inside the VM:
+# Extra ssh/scp options for the ssh backend, e.g. a config file.
+#CMUX_SSH_OPTS=-F /Users/you/.ssh/work_config
+
+# Agent permission mode on the remote:
 #   default  - agents run with their normal permission prompts
 #   bypass   - claude --dangerously-skip-permissions, codex --dangerously-bypass-approvals-and-sandbox
-# The VM is the sandbox; "bypass" is what the author runs. Choose deliberately.
-CMUX_VM_AGENT_MODE=default
+# The remote is the sandbox; "bypass" is what the author runs. Choose deliberately.
+CMUX_AGENT_MODE=default
 
 # cmux's bundled CLI (used to register the pane's restore command).
-# CMUX_CLI=/Applications/cmux.app/Contents/Resources/bin/cmux
+#CMUX_CLI=/Applications/cmux.app/Contents/Resources/bin/cmux

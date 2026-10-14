@@ -1,27 +1,29 @@
 #!/usr/bin/env bash
-# vmpaste: bridge a macOS clipboard image into the Lima VM so an agent running
-# there can read it. Saves the image under state/clip (inside this repo, which
-# is mounted into the guest) and yields the GUEST path.
+# vmpaste: bridge a macOS clipboard image to the remote so an agent running
+# there can read it. Copies the image to ~/.cache/cmux-remote/clip on the
+# remote and yields that path.
 #
-#   vmpaste                    save; if run from a cmux pane, type the guest
+#   vmpaste [--target NAME]    copy; if run from a cmux pane, type the remote
 #                              path into the focused terminal, else copy it
-#   vmpaste --surface <ref>    save and type the path into a specific surface
-#   vmpaste --clip             save and copy the guest path only
+#   vmpaste --surface <ref>    copy and type the path into a specific surface
+#   vmpaste --clip             copy and put the remote path on the clipboard only
 set -u
-CMUX_LIMA_ROOT=$(cd "$(dirname "$(python3 -c 'import os,sys;print(os.path.realpath(sys.argv[1]))' "${BASH_SOURCE[0]}")")/.." && pwd -P)
-. "$CMUX_LIMA_ROOT/lib/cmux-lima-env.sh"
-SHARE_HOST="$CMUX_LIMA_ROOT/state/clip"
-SHARE_GUEST="$CMUX_VM_GUEST_ROOT/state/clip"
-CLI="$CMUX_CLI"
-
+CMUX_REMOTE_HOME=$(cd "$(dirname "$(python3 -c 'import os,sys;print(os.path.realpath(sys.argv[1]))' "${BASH_SOURCE[0]}")")/.." && pwd -P)
+. "$CMUX_REMOTE_HOME/lib/cmux-remote-env.sh"
+. "$CMUX_REMOTE_HOME/lib/cmux-remote-transport.sh"
+TARGET="$CMUX_TARGET_DEFAULT"
 TARGET_SURFACE="" ; TARGET_WS="" ; FORCE_CLIP=""
-case "${1:-}" in
-    --surface) TARGET_SURFACE="${2:-}" ; TARGET_WS="${CMUX_WORKSPACE_ID:-}" ;;
-    --surface=*) TARGET_SURFACE="${1#*=}" ; TARGET_WS="${CMUX_WORKSPACE_ID:-}" ;;
-    --clip|--clipboard) FORCE_CLIP=1 ;;
-esac
-# No explicit target: aim at the focused cmux terminal surface, so a global
-# hotkey drops the path into whatever pane you are looking at.
+while [ $# -gt 0 ]; do
+    case "$1" in
+        -t|--target) TARGET="${2:?}"; shift 2 ;;
+        --target=*) TARGET="${1#*=}"; shift ;;
+        --surface) TARGET_SURFACE="${2:-}" ; TARGET_WS="${CMUX_WORKSPACE_ID:-}"; shift 2 ;;
+        --surface=*) TARGET_SURFACE="${1#*=}" ; TARGET_WS="${CMUX_WORKSPACE_ID:-}"; shift ;;
+        --clip|--clipboard) FORCE_CLIP=1; shift ;;
+        *) echo "vmpaste: unknown option $1" >&2; exit 2 ;;
+    esac
+done
+CLI="$CMUX_CLI"
 if [ -z "$FORCE_CLIP" ] && [ -z "$TARGET_SURFACE" ]; then
     read -r TARGET_SURFACE TARGET_WS < <(
         "$CLI" identify --no-caller --id-format both 2>/dev/null | python3 -c '
@@ -36,11 +38,9 @@ except Exception:
 fi
 [ -n "$FORCE_CLIP" ] && TARGET_SURFACE=""
 
-mkdir -p "$SHARE_HOST" 2>/dev/null
+mkdir -p "$CMUX_REMOTE_CACHE/clip" 2>/dev/null
 ts=$(date +%Y%m%d-%H%M%S)
-host_out="$SHARE_HOST/paste-$ts.png"
-
-# Extract the clipboard image as PNG via AppleScript (no extra tools needed).
+host_out="$CMUX_REMOTE_CACHE/clip/paste-$ts.png"
 res=$(osascript <<APPLESCRIPT 2>/dev/null
 try
     set outFile to POSIX file "$host_out"
@@ -58,25 +58,26 @@ on error errMsg
 end try
 APPLESCRIPT
 )
-
 if [ "$res" != "ok" ] || [ ! -s "$host_out" ]; then
     rm -f "$host_out" 2>/dev/null
     echo "vmpaste: no image on the clipboard (copy a screenshot first)." >&2
     exit 1
 fi
 
-guest_path="$SHARE_GUEST/paste-$ts.png"
+remote_home=$(cmux_remote_home "$TARGET") || { echo "vmpaste: cannot reach '$TARGET'" >&2; exit 1; }
+remote_dir="$remote_home/.cache/cmux-remote/clip"
+cmux_remote_exec "$TARGET" "mkdir -p $(printf '%q' "$remote_dir")" || exit 1
+remote_path="$remote_dir/paste-$ts.png"
+cmux_remote_copy "$TARGET" "$host_out" "$remote_path" || { echo "vmpaste: copy to '$TARGET' failed" >&2; exit 1; }
 
 if [ -n "$TARGET_SURFACE" ]; then
-    # Type the guest path with a trailing space; no Enter is sent.
     ws_args=()
     [ -n "$TARGET_WS" ] && ws_args=(--workspace "$TARGET_WS")
-    if "$CLI" send ${ws_args[@]+"${ws_args[@]}"} --surface "$TARGET_SURFACE" "$guest_path " >/dev/null 2>&1; then
-        echo "vmpaste: image -> $guest_path  (typed into the focused pane)"
+    if "$CLI" send ${ws_args[@]+"${ws_args[@]}"} --surface "$TARGET_SURFACE" "$remote_path " >/dev/null 2>&1; then
+        echo "vmpaste: image -> $TARGET:$remote_path  (typed into the focused pane)"
         exit 0
     fi
     echo "vmpaste: could not type into the focused pane; falling back to clipboard." >&2
 fi
-
-printf '%s' "$guest_path" | pbcopy
-echo "vmpaste: image -> $guest_path  (guest path copied to clipboard)"
+printf '%s' "$remote_path" | pbcopy
+echo "vmpaste: image -> $TARGET:$remote_path  (remote path copied to clipboard)"
