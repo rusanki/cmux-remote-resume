@@ -1,6 +1,7 @@
 #!/usr/bin/env python3
 """Codex wrapper: registers an explicit `codex resume <uuid>` with the pane mapping
-(Codex does not emit SessionStart for resumes), then execs the real codex."""
+(Codex does not emit SessionStart for resumes), then execs the real codex.
+Tracking problems are reported on stderr and never stop codex from starting."""
 import base64
 import json
 import os
@@ -72,35 +73,48 @@ def real_codex():
     sys.exit('cmux-codex: codex is not installed (not found on PATH)')
 
 
+def resolve_cwd(root, sid):
+    try:
+        result = subprocess.run([sys.executable, str(root/'cmux-remote-resolve.py'), 'codex', sid],
+                                capture_output=True, text=True, timeout=10)
+    except (OSError, subprocess.SubprocessError):
+        return None
+    return result.stdout.strip() if result.returncode == 0 else None
+
+
+def register_resume(root, sid, cwd, args):
+    payload = json.dumps(dict(session_id=sid, cwd=cwd, hook_event_name='SessionStart', source='resume'))
+    try:
+        if sys.platform == 'darwin':
+            # Record the wrapper as the executable, so native restore uses it again.
+            os.environ.update(CMUX_AGENT_LAUNCH_KIND='codex',
+                CMUX_AGENT_LAUNCH_EXECUTABLE=str(Path(__file__).resolve()),
+                CMUX_AGENT_LAUNCH_CWD=cwd,
+                CMUX_AGENT_LAUNCH_ARGV_B64=base64.b64encode(
+                    ('\0'.join([str(Path(__file__).resolve())]+capture_args(args))).encode()).decode())
+            cli = os.environ.get('CMUX_CLI') or os.environ.get('CMUX_BUNDLED_CLI_PATH') or '/Applications/cmux.app/Contents/Resources/bin/cmux'
+            subprocess.run([cli, 'hooks', 'codex', 'session-start'], input=payload,
+                           text=True, stdout=subprocess.DEVNULL, timeout=10)
+        else:
+            subprocess.run([sys.executable, str(root/'cmux-remote-state.py'), 'hook', 'codex'],
+                           input=payload, text=True, timeout=10)
+    except (OSError, subprocess.SubprocessError) as error:
+        print('cmux-codex: session tracking skipped: %s' % error, file=sys.stderr)
+
+
 def main():
     real = real_codex()
     args = sys.argv[1:]
     if os.environ.get('CMUX_SURFACE_ID'):
         os.environ['CMUX_CODEX_PID'] = str(os.getpid())
-        sid,cwd = resume_target(args)
+        sid, cwd = resume_target(args)
         if sid:
             root = Path(__file__).resolve().parent
             if cwd is None:
-                result = subprocess.run([sys.executable,str(root/'cmux-remote-resolve.py'),'codex',sid],
-                                        capture_output=True,text=True)
-                if result.returncode == 0:cwd=result.stdout.strip()
+                cwd = resolve_cwd(root, sid)
             cwd = os.path.abspath(os.path.expanduser(cwd or os.getcwd()))
-            if sys.platform == 'darwin':
-                # Record the wrapper as the executable, so native restore uses it again.
-                os.environ.update(CMUX_AGENT_LAUNCH_KIND='codex',
-                    CMUX_AGENT_LAUNCH_EXECUTABLE=str(Path(__file__).resolve()),
-                    CMUX_AGENT_LAUNCH_CWD=cwd,
-                    CMUX_AGENT_LAUNCH_ARGV_B64=base64.b64encode(
-                        ('\0'.join([str(Path(__file__).resolve())]+capture_args(args))).encode()).decode())
-                cli=os.environ.get('CMUX_CLI') or os.environ.get('CMUX_BUNDLED_CLI_PATH') or '/Applications/cmux.app/Contents/Resources/bin/cmux'
-                subprocess.run([cli,'hooks','codex','session-start'],
-                    input=json.dumps(dict(session_id=sid,cwd=cwd,hook_event_name='SessionStart',source='resume')),
-                    text=True,stdout=subprocess.DEVNULL,timeout=10)
-            else:
-                subprocess.run([sys.executable,str(root/'cmux-remote-state.py'),'hook','codex'],
-                    input=json.dumps(dict(session_id=sid,cwd=cwd,hook_event_name='SessionStart',source='resume')),
-                    text=True,check=True)
-    os.execv(real,[real]+args)
+            register_resume(root, sid, cwd, args)
+    os.execv(real, [real]+args)
 
 
 if __name__ == '__main__':

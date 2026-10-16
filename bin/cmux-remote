@@ -23,6 +23,6 @@ case "$cmd" in
     ready) cmux_remote_ready "${1:?target}" ;;
     record)
         cmux_target_resolve "${1:?target}"
-        cmux_remote_exec "$1" "CMUX_SURFACE_ID=$(printf '%q' "${CMUX_SURFACE_ID:-${CMUX_PANEL_ID:-}}") python3 $T_ROOT/lib/cmux-remote-state.py read" ;;
+        cmux_remote_exec "$1" "CMUX_SURFACE_ID=$(printf '%q' "${CMUX_SURFACE_ID:-${CMUX_PANEL_ID:-}}") python3 $(cmux_remote_quote "$T_ROOT")/lib/cmux-remote-state.py read" ;;
     *) sed -n '2,10p' "$0"; exit 2 ;;
 esac

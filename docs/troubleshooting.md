@@ -37,6 +37,27 @@ Look at the pane text before retyping anything.
   "auto". If it shows "manual", re-register from a pane with `vmc`; the
   `--source vmc` route is what triggers the approval prompt.
 
+## `Lima instance 'x' does not exist; nothing was started`
+
+The target name has no `CMUX_TARGET_<name>` line, so it was read as
+`lima:<name>`, and Lima has no instance of that name. Usually a typo in
+`--target`, or a pane index file (`~/.cache/cmux-remote/panes/<pane-uuid>`)
+naming a target you removed from the config. `limactl start <unknown>` would
+create a new VM from the default template, which is why the helper stops here.
+
+## The remote home looks wrong after pointing a target at another machine
+
+`cmux_remote_home` caches the remote `$HOME` in
+`~/.cache/cmux-remote/home-<target>` and never expires it. Delete that file
+when a target name moves to a different host (or user).
+
+## `install.sh: refusing to sync into ...`
+
+The remote root exists, is not empty and does not contain
+`lib/cmux-remote-run.sh`. The installer rsyncs with `--delete`, so it will
+not take over a directory that holds something else. Give the target a
+dedicated root (`ssh:<host>:/opt/cmux-remote-resume`) or empty the directory.
+
 ## `claude --resume` says no conversation found
 
 The session transcript lives under `~/.claude/projects/<encoded cwd>/` in the

@@ -2,6 +2,7 @@
 #   limactl create --name ubuntu lima/ubuntu.example.yaml && limactl start ubuntu
 # Adjust the repo mount location to wherever you cloned this project.
 base: template://ubuntu
+vmType: vz          # virtiofs needs the vz backend (macOS 13.5+)
 cpus: 4
 memory: 8GiB
 disk: 100GiB

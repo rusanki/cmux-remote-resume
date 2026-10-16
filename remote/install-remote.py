@@ -19,6 +19,11 @@ import sys
 root = Path(__file__).resolve().parent.parent
 home = Path.home()
 notify = '--notify' in sys.argv[1:]
+TRUST_BEGIN = '# cmux-remote-resume hook trust begin'
+TRUST_END = '# cmux-remote-resume hook trust end'
+# Blocks written by this and by the earlier marker are both replaced.
+TRUST_BLOCK = re.compile(r'(?ms)^# cmux(?: VM session|-remote-resume) hook trust begin\n.*?'
+                         r'^# cmux(?: VM session|-remote-resume) hook trust end\n?')
 
 
 def render(template):
@@ -63,7 +68,7 @@ def install_codex_hooks():
     for event, label in [('SessionStart', 'session_start'), ('UserPromptSubmit', 'user_prompt_submit'), ('Stop', 'stop')]:
         groups = hooks.setdefault(event, [])
         for group in groups:
-            group['hooks'] = [h for h in group.get('hooks', []) if 'cmux-remote-state.py hook codex' not in h.get('command', '') and 'cmux-vm-state.py hook codex' not in h.get('command', '')]
+            group['hooks'] = [h for h in group.get('hooks', []) if 'cmux-remote-state.py hook codex' not in h.get('command', '')]
         groups[:] = [g for g in groups if g.get('hooks')]
         handler = dict(type='command', command=command, timeout=5)
         groups.append({'hooks': [handler]})
@@ -72,12 +77,12 @@ def install_codex_hooks():
         trust.append((str(p)+':'+label+':'+str(len(groups)-1)+':0', 'sha256:'+digest))
     p.write_text(json.dumps(data, indent=2)+'\n')
     p = config/'config.toml'
-    s = p.read_text() if p.exists() else ''
-    s = re.sub(r'(?ms)^# cmux VM session hook trust begin\n.*?^# cmux VM session hook trust end\n?', '', s)
-    s += '\n# cmux VM session hook trust begin\n'
+    s = TRUST_BLOCK.sub('', p.read_text() if p.exists() else '')
+    s = s.rstrip('\n') + '\n' if s.strip() else ''
+    s += '\n' + TRUST_BEGIN + '\n'
     for key, digest in trust:
         s += '[hooks.state.'+json.dumps(key)+']\ntrusted_hash = '+json.dumps(digest)+'\n'
-    s += '# cmux VM session hook trust end\n'
+    s += TRUST_END + '\n'
     p.write_text(s)
 
 

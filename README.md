@@ -10,6 +10,7 @@ vmc                        # Claude or Codex on the default target, in this pane
 vmc ~/wd/app --codex
 vmc --target build         # another configured target
 vms /srv/project           # a remote shell that comes back in the same directory
+vms '~/project'            # ~ means the remote's home (quote it, or your shell expands it)
 vmpaste                    # drop a clipboard screenshot onto the remote for the agent
 ```
 
@@ -39,7 +40,7 @@ ssh alias). Nothing else differs between them.
 - a target: a running Lima instance (`brew install lima`), or an ssh host
   with key-based login, ideally with `ControlMaster auto` in `~/.ssh/config`
 - Claude Code and/or Codex installed on the target; bash and python3 there
-- `python3` on the Mac (ships with macOS)
+- `python3` on the Mac (ships with macOS); `rsync` for ssh targets (ships too)
 
 ## Install
 
@@ -58,6 +59,8 @@ root, for Lima it relies on the default home mount making the checkout
 visible at the same path. Then `remote/install-remote.py` runs there and adds
 the Claude and Codex hooks and a marked block to the remote `~/.bashrc`. Both
 installers are idempotent; `--sync` re-copies the repo after a `git pull`.
+The remote root is rsync'ed with `--delete`, so the installer refuses a root
+that exists, is not empty and is not already a copy of this repo.
 
 The first time a remote pane starts, cmux asks you to approve
 `.../bin/remote-restore` as an auto-restore command. Approve it once. You can
@@ -70,7 +73,7 @@ the same name win. See [config.example](config.example).
 
 | Key | Default | Meaning |
 |---|---|---|
-| `CMUX_TARGET_<name>` | `lima:<name>` | `lima:<instance>[:<root>]` or `ssh:<destination>[:<root>]`; root is where this repo lives on the remote |
+| `CMUX_TARGET_<name>` | `lima:<name>` | `lima:<instance>[:<root>]` or `ssh:<destination>[:<root>]`; root is where this repo lives on the remote. A Lima instance that does not exist is never created, so a typo in a target name fails instead of booting a new VM |
 | `CMUX_TARGET_DEFAULT` | `ubuntu` | Target used without `--target` |
 | `CMUX_SSH_OPTS` | empty | Extra options for ssh/scp/rsync, e.g. `-F ~/.ssh/work` |
 | `CMUX_AGENT_MODE` | `default` | `bypass` runs `claude --dangerously-skip-permissions` and `codex --dangerously-bypass-approvals-and-sandbox` |
@@ -86,10 +89,18 @@ the default here. Decide for yourself.
 |---|---|
 | `vmc [dir] [--claude\|--codex] [--resume <uuid>] [--target NAME]` | Start an agent on the remote. Without a flag it shows a two-item menu. Registers the pane for restore. |
 | `vms [dir] [--target NAME]` | Remote shell with directory tracking. Starting `claude` or `codex` inside it upgrades the pane to a resumable session. |
+
+`dir` is a path on the remote: absolute, or `~`/`~/...` for the remote's home
+(expanded there, so quote it or your host shell expands it to the Mac's home
+first). Paths with spaces are fine.
+
+| Command | What it does |
+|---|---|
 | `remote-restore` | What cmux runs on restore. Waits for the remote, retries the connection, offers Enter-to-retry on failure. |
 | `vmpaste [--clip] [--surface <id>] [--target NAME]` | Copy the clipboard image to the remote and type its path into the focused pane. |
 | `cmux-remote targets\|resolve\|exec\|home\|copy\|ready\|record` | Transport helpers, also handy for debugging. |
 | `ct [dir]` | Local Claude Code shortcut; cmux's own wrapper handles its restore. |
+| `codex` | On the Mac, `zsh/cmux-remote.zsh` defines a `codex` function that routes the local Codex through `lib/cmux-codex`, so an explicit `codex resume <uuid>` in a cmux pane is registered with cmux's native restore. |
 
 Tab completion for `vmc`/`vms` lists remote directories live and remembers
 the ones you used, per target.
@@ -101,18 +112,22 @@ the ones you used, per target.
 - **A booting Lima VM is waited for, not raced.** Many panes restoring at once start the VM exactly once and wait until the guest answers over ssh. An ssh host is probed with backoff until it answers.
 - **A Lima VM left "Broken" by a host reboot is repaired.** Leftover pid files can collide with a reused pid after a reboot, which makes `limactl start` refuse. The helper removes files older than the host boot. See [docs/troubleshooting.md](docs/troubleshooting.md).
 - **An in-flight generation is lost on restart.** Resume restores the conversation to its last persisted message. Nothing keeps the agent process alive while cmux is closed.
+- **The launch directory is marked trusted for Claude Code.** Before starting `claude`, `lib/cmux-trust-cwd` sets `hasTrustDialogAccepted` for the directory in the remote's `~/.claude.json` (written atomically), so a restored pane does not stall on the "Is this a project you trust?" prompt. That prompt exists to stop a checkout you did not vet from running its own settings and hooks; here the directory is one you chose with `vmc`/`vms` or resumed on purpose. If you want the prompt, remove the `cmux-trust-cwd` line from `lib/cmux-remote-run.sh`.
+- **Only the record is trusted from the remote.** `remote-restore` evaluates exactly the `KEY=value` lines the state helper prints; anything else a remote shell startup file writes is ignored, and output with no record counts as a failed read.
 
 ## Tests
 
 ```bash
-python3 -m unittest tests.test_resume
+python3 -m unittest discover -s tests
 ```
 
-Twenty-four tests cover the record store, hook semantics, the launchers over
-fake `limactl`/`ssh`/`scp`, target resolution, the Codex wrapper, the
-readiness helper for both backends including the post-reboot repair, config
-loading, and the remote installer. They run on macOS and Linux and touch
-nothing outside a temp directory.
+The suite covers the record store, hook semantics, the launchers over fake
+`limactl`/`ssh`/`scp`/`rsync`, remote path quoting, target resolution, the
+Codex wrapper, the readiness helper for both backends including the
+post-reboot repair, config loading, both installers, and the zsh completion
+(driven with stubbed compsys calls; those tests skip when `zsh` is not
+installed). Everything runs on macOS and Linux and touches nothing outside a
+temp directory. GitHub Actions runs it on both.
 
 ## Layout
 
@@ -125,6 +140,7 @@ zsh/          host shell integration (ct, codex wrapper, PATH)
 tests/        unittest suite
 docs/         design notes and troubleshooting
 lima/         example instance config
+.github/      CI: the test suite on macOS and Linux
 ```
 
 ## License

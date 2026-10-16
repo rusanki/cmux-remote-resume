@@ -9,7 +9,10 @@ callers never race a machine that is still booting. Exit 1 means it could not
 be made ready; the reason is on stdout.
 
 lima backend: many panes restore at once, so startup is serialized per
-instance with a lock; the instance is started if it is not running.
+instance with a lock; the instance is started if it is not running. An
+instance that does not exist is never started: `limactl start <unknown>`
+would create a new VM from the default template, which is what a typo in a
+target name would otherwise do.
 
 Why the pre-boot cleanup exists: Lima leaves ha.pid/vz.pid behind when the
 host reboots. If an unrelated process later owns one of those pids,
@@ -19,7 +22,8 @@ after a reboot. Files older than the host boot cannot belong to a live host
 agent, so they are removed instead of calling `limactl stop -f` (which would
 SIGKILL the unrelated pid).
 
-ssh backend: nothing is started; the probe is retried until the host answers.
+ssh backend: nothing is started and nothing is serialized; the probe is
+retried until the host answers or the timeout passes.
 """
 import fcntl
 import hashlib
@@ -56,8 +60,13 @@ def remote_command(script):
 
 
 def status():
-    result = subprocess.run(['limactl', 'list', address, '--format', '{{.Status}}'],
-                            text=True, capture_output=True)
+    """Lima's status word for the instance; empty when Lima does not know it."""
+    try:
+        result = subprocess.run(['limactl', 'list', address, '--format', '{{.Status}}'],
+                                text=True, capture_output=True)
+    except FileNotFoundError:
+        say('limactl not found (brew install lima)')
+        sys.exit(1)
     return result.stdout.strip()
 
 
@@ -151,17 +160,25 @@ if backend not in ('lima', 'ssh'):
     say('cmux-remote-ready: unknown backend %r' % backend)
     sys.exit(2)
 
+if backend == 'ssh':
+    # Nothing to start, so no lock: one unreachable host must not make the
+    # restoring panes time out one after another.
+    sys.exit(0 if remote_ready() else 1)
+
 with lockfile.open('a') as lock:
     fcntl.flock(lock, fcntl.LOCK_EX)
-    if backend == 'lima':
-        current = status()
-        if current != 'Running':
-            removed = clear_pre_boot_leftovers()
-            if removed:
-                say("Cleared stale Lima files from before the last host boot: %s" % ', '.join(removed))
-                current = status()
-        if current != 'Running' and not start_lima():
-            say("Could not start Lima VM '%s' (status: %s)." % (address, status() or 'unknown'))
-            sys.exit(1)
+    current = status()
+    if not current:
+        say("Lima instance '%s' does not exist; nothing was started. Create it with limactl, "
+            "or fix the target: a name without a CMUX_TARGET_<name> line means lima:<name>." % address)
+        sys.exit(1)
+    if current != 'Running':
+        removed = clear_pre_boot_leftovers()
+        if removed:
+            say("Cleared stale Lima files from before the last host boot: %s" % ', '.join(removed))
+            current = status()
+    if current != 'Running' and not start_lima():
+        say("Could not start Lima VM '%s' (status: %s)." % (address, status() or 'unknown'))
+        sys.exit(1)
     if not remote_ready():
         sys.exit(1)

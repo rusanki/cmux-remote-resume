@@ -4,6 +4,8 @@ from pathlib import Path
 import subprocess
 import select
 import pty
+import shutil
+import sys
 import tempfile
 import unittest
 import importlib.machinery
@@ -32,7 +34,7 @@ if tool=='limactl' and 'bash' in argv and argv[argv.index('bash')+1]=='-c': scri
 # ssh hands the remote login shell one string; emulate that shell with bash -c.
 if tool=='ssh' and argv and argv[-1].startswith('bash -c '): script=argv[-1]; runner=['bash','-c',script]
 elif script is not None: runner=['bash','-c',script]
-if script is not None and 'cmux-remote-state.py' in script:
+if script is not None and ('cmux-remote-state.py' in script or 'cmux_sync_guard' in script):
     r=subprocess.run(runner,text=True,capture_output=True)
     sys.stdout.write(r.stdout); sys.stderr.write(r.stderr); sys.exit(r.returncode)
 if script is not None and 'test -r' in script: sys.exit(0)
@@ -94,12 +96,10 @@ class ResumeTests(unittest.TestCase):
         self.state('shell', '/work/shared')
         self.assertNotIn('session_id', self.state('read'))
 
-    def test_legacy_claude_mapping_still_restores(self):
-        (self.maps/'sessions').mkdir()
-        (self.maps/'sessions/aaaaaaaa.json').write_text(json.dumps(dict(session_id='legacy', cwd='/old/project')))
-        record = self.state('read')
-        self.assertEqual(record['agent'], 'claude')
-        self.assertEqual(record['session_id'], 'legacy')
+    def test_record_is_written_only_under_the_full_pane_id(self):
+        self.hook('exact')
+        names = sorted(p.name for p in (self.maps/'sessions').iterdir())
+        self.assertEqual(names, [PANE+'.json', PANE+'.lock'])
 
     def test_claude_clean_exit_clears_only_its_session(self):
         self.hook('claude-one', agent='claude')
@@ -118,11 +118,6 @@ class ResumeTests(unittest.TestCase):
         self.env['CMUX_RESUME_SID'] = ''
         self.state('launch')
         self.assertNotIn('session_id', self.state('read'))
-
-    def test_partial_legacy_write_does_not_hide_full_record(self):
-        self.hook('exact')
-        (self.maps/'sessions/aaaaaaaa.json').write_text('{"cwd":')
-        self.assertEqual(self.state('read')['session_id'], 'exact')
 
     # ---- launchers over a fake transport ----------------------------------
     def launcher_environment(self, config=''):
@@ -194,6 +189,47 @@ class ResumeTests(unittest.TestCase):
         self.assertIn('CMUX_REMOTE_CD=/srv/app', last[-1])
         self.assertIn('/srv/cmux/lib/cmux-remote-run.sh', last[-1])
 
+    def test_launchers_quote_remote_root_and_directory(self):
+        env = self.launcher_environment('CMUX_TARGET_box=lima:vm:/opt/my root\n')
+        result = subprocess.run(['bash', str(BIN/'vms'), '--target', 'box', '~/my dir'], env=env, text=True, capture_output=True)
+        self.assertEqual(result.returncode, 0, result.stderr)
+        scripts = [c[-1] for c in self.calls()]
+        self.assertIn('test -d "$HOME"/my\\ dir', scripts)
+        self.assertIn('source /opt/my\\ root/lib/cmux-remote-run.sh', scripts)
+        self.assertIn('CMUX_REMOTE_CD=~/my dir', self.calls()[-1])
+
+    def test_tilde_directory_expands_on_the_remote(self):
+        home = self.maps/'remote-home'
+        (home/'proj').mkdir(parents=True)
+        env = dict(self.env, HOME=str(home), CMUX_REMOTE_CD='~/proj', CMUX_REMOTE_AGENT='', CMUX_RESUME_SID='')
+        result = subprocess.run(['bash', '-c', 'source "$1"', 'run', str(LIB/'cmux-remote-run.sh')],
+                                env=env, text=True, capture_output=True, stdin=subprocess.DEVNULL)
+        self.assertEqual(result.returncode, 0, result.stderr)
+        self.assertNotIn('Directory unavailable', result.stderr)
+        self.assertEqual(self.state('read')['cwd'], str(home/'proj'))
+
+    def test_restore_evaluates_only_record_lines_from_the_remote(self):
+        self.hook('e87ccf85-d6b8-4477-9c7d-ff7dcdeca2ce', agent='claude')
+        env = self.launcher_environment()
+        marker = "if script is not None and ('cmux-remote-state.py' in script"
+        self.assertIn(marker, FAKE_TRANSPORT)
+        (self.maps/'bin/limactl').write_text(FAKE_TRANSPORT.replace(marker,
+            "if script is not None and 'read-env' in script: print('touch '+os.environ['HOME']+'/pwned'); print('echo Welcome to Ubuntu')\n"+marker))
+        result = subprocess.run(['bash', str(BIN/'remote-restore')], env=env, text=True, capture_output=True, stdin=subprocess.DEVNULL)
+        self.assertEqual(result.returncode, 0, result.stderr)
+        self.assertFalse((self.maps/'pwned').exists())
+        self.assertIn('CMUX_RESUME_SID=e87ccf85-d6b8-4477-9c7d-ff7dcdeca2ce', self.calls()[-1])
+
+    def test_restore_treats_output_without_a_record_as_a_failed_read(self):
+        env = self.launcher_environment()
+        marker = "if script is not None and ('cmux-remote-state.py' in script"
+        (self.maps/'bin/limactl').write_text(FAKE_TRANSPORT.replace(marker,
+            "if script is not None and 'read-env' in script: print('echo Welcome to Ubuntu'); sys.exit(0)\n"+marker))
+        env['CMUX_REMOTE_RESTORE_ATTEMPTS'] = '1'
+        result = subprocess.run(['bash', str(BIN/'remote-restore')], env=env, text=True, capture_output=True, stdin=subprocess.DEVNULL)
+        self.assertEqual(result.returncode, 1)
+        self.assertFalse(any('-ic' in c for c in self.calls()), self.calls())
+
     def test_interactive_menu_selects_codex(self):
         env = self.launcher_environment()
         master, slave = pty.openpty()
@@ -227,16 +263,19 @@ class ResumeTests(unittest.TestCase):
 
     def test_config_file_fills_only_unset_variables(self):
         config = self.maps/'config'
-        config.write_text('# comment\nCMUX_TARGET_DEFAULT=from-file\nCMUX_AGENT_MODE="bypass"\nNOT_OURS=x\n')
+        config.write_text('# comment\nCMUX_TARGET_DEFAULT=from-file\nCMUX_AGENT_MODE="bypass"\nNOT_OURS=x\nCMUX_not a key=1\n')
         script = 'source "%s"; echo "$CMUX_TARGET_DEFAULT $CMUX_AGENT_MODE ${NOT_OURS:-unset}"' % (LIB/'cmux-remote-env.sh')
         env = {k: v for k, v in os.environ.items() if not k.startswith('CMUX_')}
         env.update(HOME=str(self.maps), CMUX_REMOTE_CONFIG=str(config))
         result = subprocess.run(['bash', '-c', script], env=env, text=True, capture_output=True)
         self.assertEqual(result.stdout.split(), ['from-file', 'bypass', 'unset'], result.stderr)
+        self.assertEqual(result.stderr, '')
         result = subprocess.run(['bash', '-c', script], env=dict(env, CMUX_TARGET_DEFAULT='from-env'), text=True, capture_output=True)
         self.assertEqual(result.stdout.split()[0], 'from-env')
-        result = subprocess.run(['zsh', '-c', script], env=env, text=True, capture_output=True)
-        self.assertEqual(result.stdout.split()[:2], ['from-file', 'bypass'], result.stderr)
+        if shutil.which('zsh'):
+            result = subprocess.run(['zsh', '-c', script], env=env, text=True, capture_output=True)
+            self.assertEqual(result.stdout.split()[:2], ['from-file', 'bypass'], result.stderr)
+            self.assertEqual(result.stderr, '')
 
     # ---- codex wrapper and remote shell block -----------------------------
     def test_codex_wrapper_identifies_only_explicit_interactive_uuid(self):
@@ -266,6 +305,50 @@ _cmux_track
         self.assertIn("alias codex='/remote/root/lib/cmux-codex --dangerously-bypass-approvals-and-sandbox'", result.stdout)
         self.assertIn('cmux-remote-state.py failed', result.stdout)
         self.assertIn('cmux-remote-state.py shell', result.stdout)
+
+    def test_codex_wrapper_runs_codex_even_if_tracking_fails(self):
+        bin_dir = self.maps/'.local/bin'
+        bin_dir.mkdir(parents=True)
+        fake = bin_dir/'codex'
+        fake.write_text('#!/usr/bin/env python3\nimport json,sys\nprint(json.dumps(sys.argv[1:]))\n')
+        fake.chmod(0o755)
+        blocker = self.maps/'not-a-directory'
+        blocker.write_text('')
+        env = dict(self.env, PATH=str(bin_dir)+os.pathsep+os.environ['PATH'],
+                   CMUX_REMOTE_STATE_DIR=str(blocker/'sessions'), CMUX_CLI=str(blocker/'missing-cmux'))
+        sid = '01a0ae52-8939-7f61-b83e-2acb625b76cb'
+        result = subprocess.run([str(LIB/'cmux-codex'), 'resume', sid], env=env, text=True, capture_output=True)
+        self.assertEqual(result.returncode, 0, result.stderr)
+        self.assertEqual(json.loads(result.stdout), ['resume', sid])
+
+    def test_trust_cwd_marks_the_directory_and_keeps_other_settings(self):
+        home = self.maps/'remote-home'
+        home.mkdir()
+        (home/'.claude.json').write_text(json.dumps({'theme': 'dark', 'projects': {'/other': {'hasTrustDialogAccepted': True}}}))
+        project = self.maps/'proj'
+        project.mkdir()
+        result = subprocess.run([str(LIB/'cmux-trust-cwd')], cwd=project, env=dict(self.env, HOME=str(home)), text=True, capture_output=True)
+        self.assertEqual(result.returncode, 0, result.stderr)
+        data = json.loads((home/'.claude.json').read_text())
+        # Keyed by the shell's $PWD, which is the resolved path (/private/var on macOS).
+        self.assertTrue(data['projects'][str(project.resolve())]['hasTrustDialogAccepted'])
+        self.assertTrue(data['projects']['/other']['hasTrustDialogAccepted'])
+        self.assertEqual(data['theme'], 'dark')
+        self.assertEqual([p.name for p in home.iterdir()], ['.claude.json'])
+
+    def test_notification_hook_does_not_need_jq(self):
+        home = self.maps/'remote-home'
+        (home/'.claude').mkdir(parents=True)
+        (home/'.claude/cmux-osc-emit.sh').write_text('#!/usr/bin/env bash\nprintf "%s" "$1"\n')
+        tools = self.maps/'tools'
+        tools.mkdir()
+        (tools/'python3').symlink_to(sys.executable)
+        (tools/'bash').symlink_to(shutil.which('bash'))
+        env = dict(self.env, HOME=str(home), PATH=str(tools))
+        result = subprocess.run(['bash', str(REMOTE/'notify/cmux-osc-notify.sh')], input='{"message": "Allow Bash?\\u0007"}',
+                                env=env, text=True, capture_output=True)
+        self.assertEqual(result.returncode, 0, result.stderr)
+        self.assertEqual(result.stdout, 'cmux: Allow Bash?')
 
     def test_agent_mode_controls_bypass_flags(self):
         bin_dir = self.maps/'.local/bin'
@@ -325,6 +408,17 @@ elif sys.argv[1]=='start':
         processes = [subprocess.Popen(['python3', str(LIB/'cmux-remote-ready.py'), 'lima', 'ubuntu'], env=env) for _ in range(4)]
         for process in processes: self.assertEqual(process.wait(timeout=10), 0)
         self.assertEqual((self.maps/'launch.log').read_text(), 'started\n')
+
+    def test_ready_refuses_to_create_an_unknown_lima_instance(self):
+        env = self.ready_env('''#!/usr/bin/env python3
+import os,pathlib,sys
+if sys.argv[1]=='list': sys.exit(0)
+pathlib.Path(os.environ['LAUNCH_LOG']).write_text(' '.join(sys.argv[1:])+'\\n')
+''')
+        result = subprocess.run(['python3', str(LIB/'cmux-remote-ready.py'), 'lima', 'devbx'], env=env, text=True, capture_output=True)
+        self.assertEqual(result.returncode, 1, result.stdout+result.stderr)
+        self.assertIn("'devbx' does not exist", result.stdout)
+        self.assertFalse((self.maps/'launch.log').exists())
 
     def test_ready_clears_pid_files_left_from_before_host_boot(self):
         env = self.ready_env(self.STALE_SHIM)
@@ -388,6 +482,42 @@ if n<2: print('ssh: connect to host devbox port 22: Connection refused',file=sys
         self.assertEqual(result.returncode, 1)
         self.assertIn('not reachable', result.stderr)
 
+    # ---- host installer ----------------------------------------------------
+    def install_environment(self):
+        env = self.launcher_environment()
+        rsync = self.maps/'bin/rsync'
+        rsync.write_text('#!/bin/sh\nprintf \'rsync %s\\n\' "$*" >> "$LAUNCH_LOG"\n')
+        rsync.chmod(0o755)
+        env['CMUX_REMOTE_CONFIG'] = str(self.maps/'install-config')
+        return env
+
+    def install_log(self):
+        log = self.maps/'launch.log'
+        return log.read_text() if log.exists() else ''
+
+    def test_install_refuses_to_sync_into_a_directory_that_is_not_this_repo(self):
+        env = self.install_environment()
+        foreign = self.maps/'remote-root'
+        foreign.mkdir()
+        (foreign/'keep.txt').write_text('mine')
+        result = subprocess.run(['bash', str(ROOT/'install.sh'), '--sync', '--target', 'devbox=ssh:devbox:%s' % foreign],
+                                env=env, text=True, capture_output=True)
+        self.assertNotEqual(result.returncode, 0)
+        self.assertIn('refusing to sync', result.stderr)
+        self.assertNotIn('rsync', self.install_log())
+        self.assertEqual((foreign/'keep.txt').read_text(), 'mine')
+
+    def test_install_syncs_into_a_missing_or_repo_directory(self):
+        env = self.install_environment()
+        fresh = self.maps/'fresh-root'
+        result = subprocess.run(['bash', str(ROOT/'install.sh'), '--sync', '--target', 'devbox=ssh:devbox:%s' % fresh],
+                                env=env, text=True, capture_output=True)
+        self.assertEqual(result.returncode, 0, result.stderr)
+        self.assertIn('rsync -a --delete', self.install_log())
+        self.assertIn('devbox:%s/' % fresh, self.install_log())
+        self.assertIn('CMUX_TARGET_devbox=ssh:devbox:%s' % fresh, (self.maps/'install-config').read_text())
+        self.assertIn('>>> CMUX-REMOTE-RESUME >>>', (self.maps/'.zshrc').read_text())
+
     # ---- remote installer --------------------------------------------------
     def test_remote_installer_is_idempotent_and_renders_root(self):
         home = self.maps/'remote-home'
@@ -395,6 +525,9 @@ if n<2: print('ssh: connect to host devbox port 22: Connection refused',file=sys
         (home/'.claude/settings.json').write_text(json.dumps({'permissions': {'defaultMode': 'auto'},
             'hooks': {'Stop': [{'hooks': [{'type': 'command', 'command': 'bash ~/.claude/other.sh'}]}]}}))
         (home/'.bashrc').write_text('export FOO=1\n')
+        (home/'.codex').mkdir()
+        (home/'.codex/config.toml').write_text('model = "x"\n# cmux VM session hook trust begin\n'
+                                               '[hooks.state."old"]\ntrusted_hash = "sha256:0"\n# cmux VM session hook trust end\n')
         env = dict(os.environ, HOME=str(home))
         for _ in range(2):
             result = subprocess.run(['python3', str(REMOTE/'install-remote.py'), '--notify'], env=env, text=True, capture_output=True)
@@ -413,7 +546,11 @@ if n<2: print('ssh: connect to host devbox port 22: Connection refused',file=sys
         self.assertIn(str(LIB/'cmux-remote-state.py'), (home/'.claude/cmux-remote-session.sh').read_text())
         codex = json.loads((home/'.codex/hooks.json').read_text())
         self.assertEqual(len(codex['hooks']['SessionStart']), 1)
-        self.assertEqual((home/'.codex/config.toml').read_text().count('hook trust begin'), 1)
+        toml = (home/'.codex/config.toml').read_text()
+        self.assertEqual(toml.count('hook trust begin'), 1)
+        self.assertIn('model = "x"', toml)
+        self.assertNotIn('cmux VM session', toml)
+        self.assertIn('# cmux-remote-resume hook trust begin', toml)
         self.assertTrue((home/'.cache/cmux-remote/sessions').is_dir())
 
 

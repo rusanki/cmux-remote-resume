@@ -6,6 +6,13 @@
 CMUX_REMOTE_ROOT=$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd -P)
 export CMUX_REMOTE_ROOT
 _cmux_lib="$CMUX_REMOTE_ROOT/lib"
+# The launchers accept "~/dir"; the tilde means this machine's home and is
+# expanded here, before anything records or uses the directory.
+case "${CMUX_REMOTE_CD:-}" in
+    '~') CMUX_REMOTE_CD="$HOME" ;;
+    '~'/*) CMUX_REMOTE_CD="$HOME${CMUX_REMOTE_CD#\~}" ;;
+esac
+export CMUX_REMOTE_CD
 python3 "$_cmux_lib/cmux-remote-state.py" launch || exit 1
 cd "${CMUX_REMOTE_CD:-$HOME}" || {
     python3 "$_cmux_lib/cmux-remote-state.py" failed

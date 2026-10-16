@@ -8,7 +8,8 @@
 #         state is written to the remote's ~/.cache, not into the repo).
 #   ssh   address = ssh destination or ~/.ssh/config alias. Remote root
 #         defaults to ~/.cmux-remote-resume; install.sh syncs the repo there.
-# A target name with no line here means lima:<name>.
+# A target name with no line here means lima:<name>. The Lima instance must
+# already exist: an unknown name is an error, never a freshly created VM.
 CMUX_TARGET_ubuntu=lima:ubuntu
 #CMUX_TARGET_devbox=ssh:devbox
 #CMUX_TARGET_build=ssh:me@build.example.com:/opt/cmux-remote-resume
