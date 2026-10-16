@@ -330,7 +330,8 @@ _cmux_track
         result = subprocess.run([str(LIB/'cmux-trust-cwd')], cwd=project, env=dict(self.env, HOME=str(home)), text=True, capture_output=True)
         self.assertEqual(result.returncode, 0, result.stderr)
         data = json.loads((home/'.claude.json').read_text())
-        self.assertTrue(data['projects'][str(project)]['hasTrustDialogAccepted'])
+        # Keyed by the shell's $PWD, which is the resolved path (/private/var on macOS).
+        self.assertTrue(data['projects'][str(project.resolve())]['hasTrustDialogAccepted'])
         self.assertTrue(data['projects']['/other']['hasTrustDialogAccepted'])
         self.assertEqual(data['theme'], 'dark')
         self.assertEqual([p.name for p in home.iterdir()], ['.claude.json'])
