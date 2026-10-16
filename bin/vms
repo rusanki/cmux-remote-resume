@@ -13,7 +13,7 @@ while [ $# -gt 0 ]; do
     case "$1" in
         -t|--target) TARGET="${2:?vms: --target needs a name}"; shift 2 ;;
         --target=*) TARGET="${1#*=}"; shift ;;
-        -h|--help) echo 'usage: vms [remote-dir] [--target NAME]'; exit 0 ;;
+        -h|--help) echo 'usage: vms [remote-dir] [--target NAME]   (remote-dir: absolute remote path, or ~/... for the remote home)'; exit 0 ;;
         -*) echo "vms: unknown option: $1" >&2; exit 2 ;;
         *) DIR="$1"; shift ;;
     esac
@@ -23,11 +23,13 @@ cmux_target_resolve "$TARGET" || exit 2
 cmux_remote_ready "$TARGET" || exit 1
 
 if [ -n "$DIR" ]; then
+    # A remote path: absolute, or "~"/"~/..." meaning the remote's home. The
+    # tilde is expanded on the remote (lib/cmux-remote-run.sh), never here.
     case "$DIR" in
-        /*|'~'/*) : ;;
-        *)  echo "vms: dir must be an absolute remote path, got: '$DIR'" >&2; exit 2 ;;
+        /*|'~'|'~'/*) : ;;
+        *)  echo "vms: dir must be an absolute remote path or start with ~/, got: '$DIR'" >&2; exit 2 ;;
     esac
-    if ! cmux_remote_exec "$TARGET" "test -d $DIR" 2>/dev/null; then
+    if ! cmux_remote_exec "$TARGET" "test -d $(cmux_remote_quote "$DIR")" 2>/dev/null; then
         echo "vms: remote directory does not exist: $DIR" >&2
         exit 2
     fi
@@ -46,6 +48,6 @@ else
     echo "vms: no CMUX_SURFACE_ID; the shell will run but will not auto-restore." >&2
 fi
 
-cmux_remote_shell "$TARGET" "source $T_ROOT/lib/cmux-remote-run.sh" \
+cmux_remote_shell "$TARGET" "source $(cmux_remote_quote "$T_ROOT")/lib/cmux-remote-run.sh" \
     "CMUX_SURFACE_ID=$SID" "CMUX_TARGET=$TARGET" "CMUX_REMOTE_CD=$DIR" \
     "CMUX_REMOTE_AGENT=" "CMUX_RESUME_SID=" "CMUX_AGENT_MODE=$CMUX_AGENT_MODE"

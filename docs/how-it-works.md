@@ -41,9 +41,12 @@ target name to `backend:address:root` from the config:
 | remote `$HOME` | cached once per target | same |
 | ready | start if stopped, repair, probe | probe with backoff |
 
-Remote snippets are run by bash on the remote, so `~` in a configured root
-expands there. The ssh path quotes with `printf %q`, which assumes the
-remote login shell understands backslash escapes (bash, zsh, sh all do).
+Remote snippets are run by bash on the remote. Roots and directories go
+through `cmux_remote_quote`: a leading `~` becomes `"$HOME"` so it expands in
+the remote's home, everything else is `printf %q`-escaped, so paths with
+spaces work. The ssh path quotes the whole snippet with `printf %q` once
+more, which assumes the remote login shell understands backslash escapes
+(bash, zsh, sh all do).
 
 ## The record
 
@@ -73,11 +76,14 @@ Rules that keep it correct:
    not running it first removes pid/socket files older than the host boot,
    starts the VM (once; other panes wait on the lock), then probes
    `test -r <root>/lib/cmux-remote-run.sh` with backoff until the remote
-   answers. For ssh it only probes. Readiness is cached per Lima host-agent pid.
-4. The pane's record is fetched (`cmux-remote-state.py read-env` on the remote).
+   answers. An instance Lima does not know is refused, not created. For ssh
+   it only probes, without the lock. Readiness is cached per Lima host-agent pid.
+4. The pane's record is fetched (`cmux-remote-state.py read-env` on the
+   remote). Only its `KEY=value` lines are evaluated on the host; output with
+   no record counts as a failed read and the mapping is left alone.
 5. An interactive bash is opened over the transport, sourcing
    `lib/cmux-remote-run.sh` with the record's values in the environment.
-6. The runner `cd`s, runs the agent through `lib/cmux-remote-agent` (which
+6. The runner expands a leading `~` in the saved directory, `cd`s, runs the agent through `lib/cmux-remote-agent` (which
    applies `CMUX_AGENT_MODE`), and when the agent exits for any reason execs
    an interactive remote shell. The pane therefore never collapses back to a
    host shell.

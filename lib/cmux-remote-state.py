@@ -2,7 +2,7 @@
 """Per-pane session records, written on the remote by agent hooks and the shell.
 
 Records live in CMUX_REMOTE_STATE_DIR (default ~/.cache/cmux-remote/sessions)
-keyed by the cmux surface UUID. Writes are atomic and locked."""
+as <pane-uuid>.json. Writes are atomic and locked per pane."""
 import fcntl
 import json
 import os
@@ -46,25 +46,10 @@ def main():
     pane = str(uuid.UUID(surface))
     root = Path(os.environ.get('CMUX_REMOTE_STATE_DIR') or str(Path.home()/'.cache/cmux-remote/sessions'))
     root.mkdir(parents=True, exist_ok=True)
-    full = root / (pane + '.json')
-    legacy = root / (surface[:8] + '.json')
-    if not legacy.exists() and (root / (surface[:8].upper() + '.json')).exists():
-        legacy = root / (surface[:8].upper() + '.json')
+    record = root / (pane + '.json')
     with (root / (pane + '.lock')).open('a') as lock:
         fcntl.flock(lock, fcntl.LOCK_EX)
-        current = read_record(full)
-        try:
-            old = read_record(legacy)
-        except ValueError:
-            if not current:
-                raise
-            old = {}  # An old shell may be midway through a non-atomic write.
-        legacy_owner = str(old.get('surface_id', '')).lower()
-        if old and legacy_owner in ('', pane):
-            if not current or (not legacy_owner and legacy.stat().st_mtime_ns > full.stat().st_mtime_ns):
-                current = old
-        if current.get('session_id') and not current.get('agent'):
-            current['agent'] = 'claude'
+        current = read_record(record)
         if mode in ('read', 'read-env'):
             if current.get('agent') not in (None, 'claude', 'codex'):
                 raise ValueError('unknown saved agent; mapping retained')
@@ -117,8 +102,7 @@ def main():
         else:
             raise ValueError('unknown operation: ' + mode)
         current.update(version=3, surface_id=pane, target=target, updated_at=time.time())
-        atomic_write(legacy, current)
-        atomic_write(full, current)
+        atomic_write(record, current)
 
 
 if __name__ == '__main__':

@@ -2,6 +2,7 @@
 # a target NAME first and resolves it; remote commands are shell snippets run by
 # bash on the remote, so '~' in a remote root expands there.
 #
+#   cmux_remote_quote PATH                   quote PATH for a remote snippet ('~/x' -> "$HOME"/x)
 #   cmux_remote_exec  NAME SCRIPT            run SCRIPT non-interactively, inherit stdio
 #   cmux_remote_shell NAME SCRIPT [K=V ...]  exec an interactive bash running SCRIPT with env
 #   cmux_remote_copy  NAME LOCAL REMOTE      copy a file to the remote
@@ -12,6 +13,17 @@
 # inside a `local -a x=(...)` declaration, so this goes through read -a).
 _cmux_ssh_opts_into() {
     read -r -a "$1" <<< "${CMUX_SSH_OPTS:-}"
+}
+
+# One word for a remote bash snippet. A leading "~" becomes "$HOME" so the
+# remote expands it in its own home; everything else is %q-escaped, so roots
+# and directories with spaces or other special characters survive.
+cmux_remote_quote() {
+    case "$1" in
+        '~') printf '"$HOME"' ;;
+        '~'/*) printf '"$HOME"/%q' "${1#\~/}" ;;
+        *) printf '%q' "$1" ;;
+    esac
 }
 
 cmux_remote_exec() {
@@ -52,6 +64,8 @@ cmux_remote_copy() {
     esac
 }
 
+# Cached in $CMUX_REMOTE_CACHE/home-<target>; delete that file if the target
+# is pointed at a different machine.
 cmux_remote_home() {
     local name="$1"
     cmux_target_resolve "$name" || return 1
@@ -66,6 +80,6 @@ cmux_remote_home() {
 cmux_remote_ready() {
     local name="$1"
     cmux_target_resolve "$name" || return 1
-    CMUX_REMOTE_PROBE="test -r $T_ROOT/lib/cmux-remote-run.sh" \
+    CMUX_REMOTE_PROBE="test -r $(cmux_remote_quote "$T_ROOT")/lib/cmux-remote-run.sh" \
         python3 "$CMUX_REMOTE_HOME/lib/cmux-remote-ready.py" "$T_BACKEND" "$T_ADDR"
 }

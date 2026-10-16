@@ -22,6 +22,7 @@ while [ $# -gt 0 ]; do
         -h|--help)
             echo 'usage: vmc [remote-dir] [--claude|--codex|--agent claude|codex] [--resume <session-UUID>] [--target NAME]'
             echo 'Without an agent flag, vmc offers a Claude / Codex menu.'
+            echo 'remote-dir is a path on the remote: absolute, or ~/... for the remote home.'
             exit 0 ;;
         -*) echo "vmc: unknown option: $1" >&2; exit 2 ;;
         *) if [ -z "$DIR" ]; then DIR="$1"; shift; else echo 'vmc: too many directories' >&2; exit 2; fi ;;
@@ -46,12 +47,14 @@ case "$AGENT" in claude|codex) ;; *) echo "vmc: unsupported agent: $AGENT" >&2; 
 cmux_target_resolve "$TARGET"
 cmux_remote_ready "$TARGET"
 if [ -n "$RSID" ]; then
-    RESOLVED=$(cmux_remote_exec "$TARGET" "python3 $T_ROOT/lib/cmux-remote-resolve.py $(printf '%q' "$AGENT") $(printf '%q' "$RSID")") || exit 2
+    RESOLVED=$(cmux_remote_exec "$TARGET" "python3 $(cmux_remote_quote "$T_ROOT")/lib/cmux-remote-resolve.py $(printf '%q' "$AGENT") $(printf '%q' "$RSID")") || exit 2
     DIR="${DIR:-$RESOLVED}"
 fi
 if [ -n "$DIR" ]; then
-    case "$DIR" in /*|'~'/*) ;; *) echo 'vmc: directory must be an absolute remote path.' >&2; exit 2 ;; esac
-    cmux_remote_exec "$TARGET" "test -d $DIR" || { echo "vmc: remote directory does not exist: $DIR" >&2; exit 2; }
+    # A remote path: absolute, or "~"/"~/..." meaning the remote's home. The
+    # tilde is expanded on the remote (lib/cmux-remote-run.sh), never here.
+    case "$DIR" in /*|'~'|'~'/*) ;; *) echo 'vmc: directory must be an absolute remote path or start with ~/.' >&2; exit 2 ;; esac
+    cmux_remote_exec "$TARGET" "test -d $(cmux_remote_quote "$DIR")" || { echo "vmc: remote directory does not exist: $DIR" >&2; exit 2; }
     mkdir -p "$CMUX_REMOTE_CACHE"
     printf '%s\n' "${DIR%/}" >> "$CMUX_REMOTE_CACHE/history-$TARGET"
 fi
@@ -65,6 +68,6 @@ if [ -n "$SID" ]; then
 else
     echo 'vmc: outside a cmux pane; automatic restore is unavailable.' >&2
 fi
-cmux_remote_shell "$TARGET" "source $T_ROOT/lib/cmux-remote-run.sh" \
+cmux_remote_shell "$TARGET" "source $(cmux_remote_quote "$T_ROOT")/lib/cmux-remote-run.sh" \
     "CMUX_SURFACE_ID=$SID" "CMUX_TARGET=$TARGET" "CMUX_REMOTE_CD=$DIR" \
     "CMUX_REMOTE_AGENT=$AGENT" "CMUX_RESUME_SID=$RSID" "CMUX_AGENT_MODE=$CMUX_AGENT_MODE"

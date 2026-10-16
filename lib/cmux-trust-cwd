@@ -1,18 +1,36 @@
 #!/usr/bin/env bash
-# cmux-trust-cwd: mark $PWD as trusted in claude's config so `claude` doesn't
-# block on the "Is this a project you trust?" onboarding prompt. Idempotent,
-# silent, fast. Called
-# from cmux-remote-run.sh before launching claude in a
-# resumed or saved directory.
+# cmux-trust-cwd: mark $PWD as trusted in Claude Code's ~/.claude.json so
+# `claude` does not stop at the "Is this a project you trust?" prompt in a
+# directory you launched or restored on purpose. Idempotent, silent, fast.
+# Called from cmux-remote-run.sh before launching claude.
+#
+# ~/.claude.json is Claude Code's main config and another claude in a
+# neighbouring pane may be writing it at the same moment, so the new content
+# goes to a temp file first and replaces the original atomically.
 python3 - "$PWD" <<'PY' 2>/dev/null || true
-import json, os, sys
+import json, os, sys, tempfile
 p = os.path.expanduser("~/.claude.json")
 try:
-    d = json.load(open(p))
+    with open(p) as f:
+        d = json.load(f)
 except Exception:
     sys.exit()
 n = d.setdefault("projects", {}).setdefault(sys.argv[1], {})
-if not n.get("hasTrustDialogAccepted"):
-    n["hasTrustDialogAccepted"] = True
-    json.dump(d, open(p, "w"))
+if n.get("hasTrustDialogAccepted"):
+    sys.exit()
+n["hasTrustDialogAccepted"] = True
+fd, tmp = tempfile.mkstemp(dir=os.path.dirname(p), prefix=".claude.json.")
+try:
+    with os.fdopen(fd, "w") as f:
+        json.dump(d, f)
+        f.flush()
+        os.fsync(f.fileno())
+    try:
+        os.chmod(tmp, os.stat(p).st_mode & 0o777)
+    except OSError:
+        pass
+    os.replace(tmp, p)
+finally:
+    if os.path.exists(tmp):
+        os.unlink(tmp)
 PY
