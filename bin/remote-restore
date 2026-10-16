@@ -20,15 +20,25 @@ TARGET="${TARGET:-$CMUX_TARGET_DEFAULT}"
 cmux_target_resolve "$TARGET"
 MAX_ATTEMPTS="${CMUX_REMOTE_RESTORE_ATTEMPTS:-3}"
 
+# The record comes back as KEY=value lines quoted by shlex.quote: either bare
+# [A-Za-z0-9@%+=:,./_-]* or '...' with embedded quotes written as '"'"'.
+# Only lines of exactly that shape are evaluated, so a remote shell startup
+# file that prints something never runs on the host, and output without a
+# record at all counts as a failed read (the mapping stays untouched).
+_q="'"
+RECORD_LINE="^G[A-Z_]+=(${_q}([^${_q}]|${_q}\"${_q}\"${_q})*${_q}|[A-Za-z0-9@%+=:,./_-]*)\$"
 read_record() {
-    values=$(cmux_remote_exec "$TARGET" "CMUX_SURFACE_ID=$(printf '%q' "$SID") python3 $T_ROOT/lib/cmux-remote-state.py read-env") || return 1
+    local output values
+    output=$(cmux_remote_exec "$TARGET" "CMUX_SURFACE_ID=$(printf '%q' "$SID") python3 $(cmux_remote_quote "$T_ROOT")/lib/cmux-remote-state.py read-env") || return 1
+    values=$(printf '%s\n' "$output" | grep -E "$RECORD_LINE") || return 1
+    printf '%s\n' "$values" | grep -q '^GAGENT=' || return 1
     eval "$values"
 }
 
 connect() {
     local -a extra=()
     if [ -n "${GCODEX_HOME:-}" ]; then extra+=("CODEX_HOME=$GCODEX_HOME"); fi
-    (cmux_remote_shell "$TARGET" "source $T_ROOT/lib/cmux-remote-run.sh" \
+    (cmux_remote_shell "$TARGET" "source $(cmux_remote_quote "$T_ROOT")/lib/cmux-remote-run.sh" \
         "CMUX_SURFACE_ID=$SID" "CMUX_TARGET=$TARGET" "CMUX_REMOTE_CD=${GCWD:-}" \
         "CMUX_REMOTE_AGENT=${GAGENT:-}" "CMUX_RESUME_SID=${GSESSION:-}" \
         "CMUX_AGENT_MODE=$CMUX_AGENT_MODE" ${extra[@]+"${extra[@]}"})
@@ -52,7 +62,7 @@ while :; do
         fi
         [ "$attempt" -lt "$MAX_ATTEMPTS" ] && sleep $((attempt*2))
     done
-    echo "remote-restore: '$TARGET' is not reachable. The saved session is retained." >&2
+    echo "remote-restore: '$TARGET' is not reachable or returned no record. The saved session is retained." >&2
     if [ -t 0 ]; then
         printf 'Press Enter to retry, or Ctrl-C for a host shell. '
         read -r _ || exit 1

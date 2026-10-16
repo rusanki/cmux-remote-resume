@@ -4,7 +4,14 @@
 # and routes `codex` through the resume-aware wrapper, preserving your options.
 if [ -n "${CMUX_SURFACE_ID:-}" ]; then
     CMUX_REMOTE_ROOT="${CMUX_REMOTE_ROOT:-@ROOT@}"
-    if [ -n "${CMUX_REMOTE_CD:-}" ]; then cd "$CMUX_REMOTE_CD" 2>/dev/null; fi
+    # Best effort: lib/cmux-remote-run.sh reports a missing directory itself.
+    case "${CMUX_REMOTE_CD:-}" in
+        '') : ;;
+        '~') cd "$HOME" 2>/dev/null || : ;;
+        '~'/*) cd "$HOME${CMUX_REMOTE_CD#\~}" 2>/dev/null || : ;;
+        *) cd "$CMUX_REMOTE_CD" 2>/dev/null || : ;;
+    esac
+    # shellcheck disable=SC2139  # the alias is meant to capture the root now
     if alias codex >/dev/null 2>&1; then
         _cmux_alias=$(alias codex)
         _cmux_alias=${_cmux_alias#alias codex=}

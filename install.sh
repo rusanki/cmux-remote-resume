@@ -32,6 +32,19 @@ done
 
 CONFIG="${CMUX_REMOTE_CONFIG:-$HOME/.config/cmux-remote/config}"
 mkdir -p "$(dirname "$CONFIG")"
+
+# set_key KEY VALUE: replace the KEY=... line in the config or append one.
+# awk through ENVIRON, so it works with BSD and GNU tools and any value.
+set_key() {
+    if grep -q "^$1=" "$CONFIG"; then
+        local tmp; tmp=$(mktemp "$CONFIG.XXXXXX")
+        KEY="$1" VALUE="$2" awk 'index($0, ENVIRON["KEY"] "=") == 1 { print ENVIRON["KEY"] "=" ENVIRON["VALUE"]; next } { print }' "$CONFIG" > "$tmp"
+        mv "$tmp" "$CONFIG"
+    else
+        printf '%s=%s\n' "$1" "$2" >> "$CONFIG"
+    fi
+}
+
 if [ "${#TARGETS[@]}" -gt 0 ]; then first="${TARGETS[0]%%=*}"; else first="ubuntu"; fi
 if [ ! -f "$CONFIG" ]; then
     {
@@ -46,15 +59,10 @@ else
 fi
 for spec in ${TARGETS[@]+"${TARGETS[@]}"}; do
     name=${spec%%=*}; value=${spec#*=}
-    key="CMUX_TARGET_$(printf '%s' "$name" | tr -- '-' '_')"
-    if grep -q "^$key=" "$CONFIG"; then
-        sed -i '' "s|^$key=.*|$key=$value|" "$CONFIG"
-    else
-        printf '%s=%s\n' "$key" "$value" >> "$CONFIG"
-    fi
+    set_key "CMUX_TARGET_$(printf '%s' "$name" | tr -- '-' '_')" "$value"
 done
-[ -n "$DEFAULT" ] && sed -i '' "s|^CMUX_TARGET_DEFAULT=.*|CMUX_TARGET_DEFAULT=$DEFAULT|" "$CONFIG"
-[ -n "$MODE" ] && sed -i '' "s|^CMUX_AGENT_MODE=.*|CMUX_AGENT_MODE=$MODE|" "$CONFIG"
+[ -n "$DEFAULT" ] && set_key CMUX_TARGET_DEFAULT "$DEFAULT"
+[ -n "$MODE" ] && set_key CMUX_AGENT_MODE "$MODE"
 CMUX_REMOTE_HOME="$ROOT"; . "$ROOT/lib/cmux-remote-env.sh"; . "$ROOT/lib/cmux-remote-transport.sh"
 
 ZSHRC="$HOME/.zshrc"
@@ -74,13 +82,14 @@ install_remote() {
     local name="$1"
     cmux_target_resolve "$name"
     echo "== $name ($T_BACKEND:$T_ADDR, root $T_ROOT)"
+    local runner; runner="$(cmux_remote_quote "$T_ROOT")/lib/cmux-remote-run.sh"
     case "$T_BACKEND" in
         lima)
             command -v limactl >/dev/null || { echo 'limactl not found (brew install lima)' >&2; return 1; }
             if [ "$(limactl list "$T_ADDR" --format '{{.Status}}' 2>/dev/null)" != "Running" ]; then
                 echo "Lima VM '$T_ADDR' is not running; start it and re-run, or use --no-remote." >&2; return 1
             fi
-            if ! cmux_remote_exec "$name" "test -r $T_ROOT/lib/cmux-remote-run.sh" 2>/dev/null; then
+            if ! cmux_remote_exec "$name" "test -r $runner" 2>/dev/null; then
                 if [ -n "$SYNC" ] || [ "$T_ROOT" != "$ROOT" ]; then
                     sync_repo "$name"
                 else
@@ -94,11 +103,11 @@ MSG
                 fi
             fi ;;
         ssh)
-            if [ -n "$SYNC" ] || ! cmux_remote_exec "$name" "test -r $T_ROOT/lib/cmux-remote-run.sh" 2>/dev/null; then
+            if [ -n "$SYNC" ] || ! cmux_remote_exec "$name" "test -r $runner" 2>/dev/null; then
                 sync_repo "$name"
             fi ;;
     esac
-    cmux_remote_exec "$name" "python3 $T_ROOT/remote/install-remote.py ${NOTIFY:+--notify}"
+    cmux_remote_exec "$name" "python3 $(cmux_remote_quote "$T_ROOT")/remote/install-remote.py ${NOTIFY:+--notify}"
 }
 
 sync_repo() {
@@ -106,16 +115,24 @@ sync_repo() {
     cmux_target_resolve "$name"
     local home; home=$(cmux_remote_home "$name") || { echo "cannot reach $name" >&2; return 1; }
     local dest="${T_ROOT/#\~/$home}"
+    local qdest; qdest=$(printf '%q' "$dest")
+    # rsync --delete must only ever touch a directory that is this repo's copy:
+    # the remote root may be missing, empty, or already hold lib/cmux-remote-run.sh.
+    if ! cmux_remote_exec "$name" "cmux_sync_guard=$qdest; [ ! -e \"\$cmux_sync_guard\" ] || [ -e \"\$cmux_sync_guard/lib/cmux-remote-run.sh\" ] || [ -z \"\$(ls -A \"\$cmux_sync_guard\" 2>/dev/null)\" ]"; then
+        echo "install.sh: refusing to sync into $name:$dest: it exists, is not empty and is not a copy of this repo. Give the target a dedicated remote root." >&2
+        return 1
+    fi
     echo "syncing repo to $name:$dest"
-    cmux_remote_exec "$name" "mkdir -p $(printf '%q' "$dest")"
+    cmux_remote_exec "$name" "mkdir -p $qdest"
     case "$T_BACKEND" in
         ssh)
             # shellcheck disable=SC2086
             rsync -a --delete --exclude .git --exclude __pycache__ -e "ssh $CMUX_SSH_OPTS" "$ROOT/" "$T_ADDR:$dest/" ;;
         lima)
-            local tar; tar=$(mktemp -t cmux-remote); tar -C "$ROOT" --exclude .git --exclude __pycache__ -cf "$tar" .
+            local tar; tar=$(mktemp "${TMPDIR:-/tmp}/cmux-remote.XXXXXX")
+            tar -C "$ROOT" --exclude .git --exclude __pycache__ -cf "$tar" .
             cmux_remote_copy "$name" "$tar" "$dest/.sync.tar"
-            cmux_remote_exec "$name" "cd $(printf '%q' "$dest") && tar -xf .sync.tar && rm -f .sync.tar"
+            cmux_remote_exec "$name" "cd $qdest && tar -xf .sync.tar && rm -f .sync.tar"
             rm -f "$tar" ;;
     esac
 }

@@ -11,8 +11,10 @@
 #   root     where this repository lives on the remote. Default for lima is
 #            this checkout's own path (Lima's home mount), for ssh it is
 #            ~/.cmux-remote-resume (install.sh syncs it there).
-# A name with no CMUX_TARGET_<name> line means lima:<name>.
+# A name with no CMUX_TARGET_<name> line means lima:<name>; the readiness
+# helper refuses to start (and so to create) a Lima instance that does not exist.
 if [ -z "${CMUX_REMOTE_HOME:-}" ]; then
+    # shellcheck disable=SC2296  # the inner expansion is zsh's, reached only there
     _cmux_self="${BASH_SOURCE[0]:-${(%):-%x}}"
     CMUX_REMOTE_HOME=$(cd "$(dirname "$_cmux_self")/.." && pwd -P)
     unset _cmux_self
@@ -25,7 +27,7 @@ if [ -f "$CMUX_REMOTE_CONFIG" ]; then
         _cmux_key=${_cmux_line%%=*}
         _cmux_val=${_cmux_line#*=}
         case "$_cmux_key" in
-            CMUX_[A-Za-z0-9_]*) ;;
+            CMUX_*) case "$_cmux_key" in *[!A-Za-z0-9_]*) continue ;; esac ;;
             *) continue ;;
         esac
         _cmux_val=${_cmux_val%\"}; _cmux_val=${_cmux_val#\"}
@@ -57,6 +59,7 @@ cmux_target_resolve() {
         *) T_ADDR=$_cmux_rest; T_ROOT='' ;;
     esac
     unset _cmux_var _cmux_spec _cmux_rest
+    # shellcheck disable=SC2088  # the ssh default is a literal ~, expanded on the remote by cmux_remote_quote
     case "$T_BACKEND" in
         lima) [ -n "$T_ROOT" ] || T_ROOT="$CMUX_REMOTE_HOME" ;;
         ssh) [ -n "$T_ROOT" ] || T_ROOT='~/.cmux-remote-resume' ;;
